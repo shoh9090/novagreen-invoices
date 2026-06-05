@@ -54,33 +54,31 @@ app.get('/api/selftest', async (req, res) => {
   }
 });
 
-/* Диагностика заказов: /api/sd-debug?order=НОМЕР — покажет, каким полем находится заказ */
+/* Диагностика заказов: /api/sd-debug?date=ГГГГ-ММ-ДД — покажет заказы за дату */
 app.get('/api/sd-debug', async (req, res) => {
   const domain = process.env.SD_DOMAIN;
-  const order = (req.query.order || '').toString().trim();
-  if (!order) return res.json({ error: 'Добавьте ?order=НОМЕР_ЗАКАЗА в адрес' });
+  const date = (req.query.date || '').toString().trim();
+  if (!date) return res.json({ error: 'Добавьте ?date=ГГГГ-ММ-ДД в адрес (например ?date=2026-05-11)' });
   try {
     const auth = await sdLogin(false);
     const ST = [1, 2, 3, 4, 5];
     async function q(filter) {
       const r = await fetch(`https://${domain}/api/v2`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ method: 'getOrder', auth: { userId: auth.userId, token: auth.token }, params: { limit: 3, filter } })
+        body: JSON.stringify({ method: 'getOrder', auth: { userId: auth.userId, token: auth.token }, params: { limit: 300, filter } })
       });
       const j = await r.json();
       const orders = (j.result && j.result.order) || [];
       return {
         count: orders.length,
-        sample: orders.map(o => ({ code_1C: o.code_1C, SD_id: o.SD_id, invoiceNumber: o.invoiceNumber, client: o.client && o.client.clientName, total: o.totalSummaAfterDiscount }))
+        total_in_crm: j.pagination && j.pagination.total,
+        sample: orders.slice(0, 60).map(o => ({ SD_id: o.SD_id, invoiceNumber: o.invoiceNumber, date: o.dateDocument, client: o.client && o.client.clientName, legal: o.client && o.client.clientLegalName, total: o.totalSummaAfterDiscount }))
       };
     }
     res.json({
-      searched: order,
-      A_all_code_1C: await q({ include: 'all', code_1C: order, status: ST }),
-      B_1c_code_1C:  await q({ include: '1c',  code_1C: order, status: ST }),
-      C_all_SD_id:   await q({ include: 'all', SD_id: order,   status: ST }),
-      D_all_CS_id:   await q({ include: 'all', CS_id: order,   status: ST }),
-      E_all_invoiceNumber: await q({ include: 'all', invoiceNumber: order, status: ST })
+      date,
+      by_dateLoad: await q({ include: 'all', status: ST, period: { dateLoad: { from: date, to: date } } }),
+      by_date: await q({ include: 'all', status: ST, period: { date: { from: date, to: date } } })
     });
   } catch (e) {
     res.json({ error: e.message });
@@ -117,41 +115,62 @@ async function sdLogin(force) {
 app.post('/api/sd/order', async (req, res) => {
   const domain = process.env.SD_DOMAIN;
   try {
-    const orderNumber = (req.body && req.body.orderNumber || '').toString().trim();
-    if (!orderNumber) return res.status(400).json({ error: 'Не передан номер заказа.' });
-    const idType = (process.env.SD_ID_TYPE || req.body.idType || 'code_1C');
-    const field  = ['SD_id', 'CS_id', 'code_1C'].includes(idType) ? idType : 'code_1C';
+    const b = req.body || {};
+    const invNum   = (b.invoiceNumber || '').toString().trim();
+    const point    = (b.point || '').toString().trim();
+    const customer = (b.customer || '').toString().trim();
+    const rawDate  = (b.date || '').toString().trim();           // ДД.ММ.ГГГГ со скана
+    if (!invNum && !point) return res.status(400).json({ error: 'Нет данных для поиска (номер СФ или точка).' });
 
-    const makeBody = (auth) => ({
-      method: 'getOrder',
-      auth: { userId: auth.userId, token: auth.token },
-      params: { limit: 5, filter: { [field]: orderNumber, status: [1, 2, 3, 4, 5] } }
-    });
+    // ДД.ММ.ГГГГ → ГГГГ-ММ-ДД
+    function toISO(d) { const m = d.match(/(\d{1,2})[.\-/](\d{1,2})[.\-/](\d{4})/); return m ? `${m[3]}-${m[2].padStart(2, '0')}-${m[1].padStart(2, '0')}` : null; }
+    function shift(iso, days) { const dt = new Date(iso + 'T00:00:00Z'); dt.setUTCDate(dt.getUTCDate() + days); return dt.toISOString().slice(0, 10); }
+    const iso = toISO(rawDate);
+    const norm = s => (s == null ? '' : String(s)).replace(/\s+/g, '').toLowerCase();
 
     let auth = await sdLogin(false);
-    let r = await fetch(`https://${domain}/api/v2`, {
-      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(makeBody(auth))
-    });
-    let j = await r.json();
-    // Истёк/занят токен → один повторный логин
-    if (j.error && (j.error.code === 401)) {
-      auth = await sdLogin(true);
-      r = await fetch(`https://${domain}/api/v2`, {
-        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(makeBody(auth))
-      });
-      j = await r.json();
+    async function fetchOrders(filter) {
+      const makeBody = (a) => ({ method: 'getOrder', auth: { userId: a.userId, token: a.token }, params: { limit: 1000, filter } });
+      let r = await fetch(`https://${domain}/api/v2`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(makeBody(auth)) });
+      let j = await r.json();
+      if (j.error && j.error.code === 401) {
+        auth = await sdLogin(true);
+        r = await fetch(`https://${domain}/api/v2`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(makeBody(auth)) });
+        j = await r.json();
+      }
+      return (j.result && j.result.order) || [];
     }
-    if (!j.status) return res.json({ found: false, error: (j.error && j.error.message) || 'Ошибка SalesDoctor' });
 
-    const orders = (j.result && j.result.order) || [];
-    if (!orders.length) return res.json({ found: false });
+    const ST = [1, 2, 3, 4, 5];
+    let orders = [];
+    if (iso) {
+      // окно ±2 дня по дате документа (отгрузки)
+      orders = await fetchOrders({ include: 'all', status: ST, period: { dateLoad: { from: shift(iso, -2), to: shift(iso, 2) } } });
+      // если по дате документа ничего — пробуем по дате заказа (заявки)
+      if (!orders.length) orders = await fetchOrders({ include: 'all', status: ST, period: { date: { from: shift(iso, -2), to: shift(iso, 2) } } });
+    }
 
-    const o = orders[0];
+    // 1) основной ключ — номер счёт-фактуры (цифры, устойчив к распознаванию)
+    let match = invNum ? orders.find(o => norm(o.invoiceNumber) === norm(invNum)) : null;
+    let matchedBy = match ? 'invoiceNumber' : null;
+    // 2) запасной — по торговой точке / юр. названию
+    if (!match && (point || customer)) {
+      match = orders.find(o => {
+        const cn = norm(o.client && o.client.clientName), ln = norm(o.client && o.client.clientLegalName);
+        return (point && cn === norm(point)) || (customer && ln === norm(customer));
+      });
+      if (match) matchedBy = 'point';
+    }
+
+    if (!match) return res.json({ found: false, scanned: { invoiceNumber: invNum, date: iso, point }, looked: orders.length });
+
+    const o = match;
     res.json({
-      found: true,
+      found: true, matchedBy,
       order: {
         code_1C: o.code_1C, SD_id: o.SD_id, CS_id: o.CS_id,
         status: o.status, invoiceNumber: o.invoiceNumber, dateDocument: o.dateDocument,
+        comment: o.comment,
         totalSumma: o.totalSumma, discountSumma: o.discountSumma,
         totalSummaAfterDiscount: o.totalSummaAfterDiscount,
         totalReturnsSumma: o.totalReturnsSumma, totalReturnsCount: o.totalReturnsCount,
