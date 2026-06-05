@@ -449,7 +449,7 @@ async function recognizeAll(){
 }
 async function recognizePage(p){
   const resp=await fetch("/api/claude",{method:"POST",headers:{"Content-Type":"application/json"},
-    body:JSON.stringify({model:"claude-sonnet-4-20250514",max_tokens:1000,messages:[{role:"user",content:[
+    body:JSON.stringify({model:"claude-sonnet-4-6",max_tokens:1000,messages:[{role:"user",content:[
       {type:"image",source:{type:"base64",media_type:p.mediaType,data:p.b64}},{type:"text",text:PROMPT}]}]})});
   if(!resp.ok) throw new Error('HTTP '+resp.status);
   const data=await resp.json();
