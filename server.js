@@ -61,6 +61,7 @@ app.get('/api/sd-debug', async (req, res) => {
   if (!order) return res.json({ error: 'Добавьте ?order=НОМЕР_ЗАКАЗА в адрес' });
   try {
     const auth = await sdLogin(false);
+    const ST = [1, 2, 3, 4, 5];
     async function q(filter) {
       const r = await fetch(`https://${domain}/api/v2`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
@@ -69,24 +70,17 @@ app.get('/api/sd-debug', async (req, res) => {
       const j = await r.json();
       const orders = (j.result && j.result.order) || [];
       return {
-        ok: j.status, err: j.error ? (j.error.message || j.error) : undefined, count: orders.length,
-        sample: orders.map(o => ({ code_1C: o.code_1C, SD_id: o.SD_id, CS_id: o.CS_id, invoiceNumber: o.invoiceNumber, client: o.client && o.client.clientName }))
+        count: orders.length,
+        sample: orders.map(o => ({ code_1C: o.code_1C, SD_id: o.SD_id, invoiceNumber: o.invoiceNumber, client: o.client && o.client.clientName, total: o.totalSummaAfterDiscount }))
       };
     }
-    // ключи первого заказа без фильтра — чтобы увидеть реальные имена полей
-    const rk = await fetch(`https://${domain}/api/v2`, {
-      method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ method: 'getOrder', auth: { userId: auth.userId, token: auth.token }, params: { limit: 1, filter: {} } })
-    });
-    const jk = await rk.json();
-    const first = (jk.result && jk.result.order || [])[0];
     res.json({
       searched: order,
-      fields_available: first ? Object.keys(first) : [],
-      by_code_1C: await q({ code_1C: order }),
-      by_SD_id: await q({ SD_id: order }),
-      by_CS_id: await q({ CS_id: order }),
-      by_invoiceNumber: await q({ invoiceNumber: order })
+      A_all_code_1C: await q({ include: 'all', code_1C: order, status: ST }),
+      B_1c_code_1C:  await q({ include: '1c',  code_1C: order, status: ST }),
+      C_all_SD_id:   await q({ include: 'all', SD_id: order,   status: ST }),
+      D_all_CS_id:   await q({ include: 'all', CS_id: order,   status: ST }),
+      E_all_invoiceNumber: await q({ include: 'all', invoiceNumber: order, status: ST })
     });
   } catch (e) {
     res.json({ error: e.message });
