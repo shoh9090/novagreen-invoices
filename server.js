@@ -1,10 +1,10 @@
 const express = require('express');
 const path    = require('path');
- 
+
 const app = express();
 app.use(express.json({ limit: '50mb' }));
 app.use(express.static(path.join(__dirname, 'public')));
- 
+
 /* ============================================================
    1. Claude API — распознавание (безопасный прокси)
    ============================================================ */
@@ -16,7 +16,7 @@ app.post('/api/claude', async (req, res) => {
     const body = req.body || {};
     body.model = process.env.CLAUDE_MODEL || 'claude-sonnet-4-6';
     if (!body.max_tokens) body.max_tokens = 1500;
- 
+
     const r = await fetch('https://api.anthropic.com/v1/messages', {
       method: 'POST',
       headers: {
@@ -33,7 +33,7 @@ app.post('/api/claude', async (req, res) => {
     res.status(502).json({ error: 'Ошибка Claude API: ' + err.message });
   }
 });
- 
+
 /* Самодиагностика: открыть в браузере /api/selftest — покажет точную причину */
 app.get('/api/selftest', async (req, res) => {
   const key = process.env.ANTHROPIC_API_KEY;
@@ -53,12 +53,51 @@ app.get('/api/selftest', async (req, res) => {
     res.json({ ok: false, where: 'network', error: e.message });
   }
 });
- 
+
+/* Диагностика заказов: /api/sd-debug?order=НОМЕР — покажет, каким полем находится заказ */
+app.get('/api/sd-debug', async (req, res) => {
+  const domain = process.env.SD_DOMAIN;
+  const order = (req.query.order || '').toString().trim();
+  if (!order) return res.json({ error: 'Добавьте ?order=НОМЕР_ЗАКАЗА в адрес' });
+  try {
+    const auth = await sdLogin(false);
+    async function q(filter) {
+      const r = await fetch(`https://${domain}/api/v2`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ method: 'getOrder', auth: { userId: auth.userId, token: auth.token }, params: { limit: 3, filter } })
+      });
+      const j = await r.json();
+      const orders = (j.result && j.result.order) || [];
+      return {
+        ok: j.status, err: j.error ? (j.error.message || j.error) : undefined, count: orders.length,
+        sample: orders.map(o => ({ code_1C: o.code_1C, SD_id: o.SD_id, CS_id: o.CS_id, invoiceNumber: o.invoiceNumber, client: o.client && o.client.clientName }))
+      };
+    }
+    // ключи первого заказа без фильтра — чтобы увидеть реальные имена полей
+    const rk = await fetch(`https://${domain}/api/v2`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ method: 'getOrder', auth: { userId: auth.userId, token: auth.token }, params: { limit: 1, filter: {} } })
+    });
+    const jk = await rk.json();
+    const first = (jk.result && jk.result.order || [])[0];
+    res.json({
+      searched: order,
+      fields_available: first ? Object.keys(first) : [],
+      by_code_1C: await q({ code_1C: order }),
+      by_SD_id: await q({ SD_id: order }),
+      by_CS_id: await q({ CS_id: order }),
+      by_invoiceNumber: await q({ invoiceNumber: order })
+    });
+  } catch (e) {
+    res.json({ error: e.message });
+  }
+});
+
 /* ============================================================
    2. SalesDoctor — получение заказа по номеру
    ============================================================ */
 let sdToken = { userId: null, token: null, ts: 0 };
- 
+
 async function sdLogin(force) {
   const domain   = process.env.SD_DOMAIN;
   const login    = process.env.SD_LOGIN;
@@ -80,7 +119,7 @@ async function sdLogin(force) {
   sdToken = { userId: j.result.userId, token: j.result.token, ts: Date.now() };
   return sdToken;
 }
- 
+
 app.post('/api/sd/order', async (req, res) => {
   const domain = process.env.SD_DOMAIN;
   try {
@@ -88,13 +127,13 @@ app.post('/api/sd/order', async (req, res) => {
     if (!orderNumber) return res.status(400).json({ error: 'Не передан номер заказа.' });
     const idType = (process.env.SD_ID_TYPE || req.body.idType || 'code_1C');
     const field  = ['SD_id', 'CS_id', 'code_1C'].includes(idType) ? idType : 'code_1C';
- 
+
     const makeBody = (auth) => ({
       method: 'getOrder',
       auth: { userId: auth.userId, token: auth.token },
       params: { limit: 5, filter: { [field]: orderNumber, status: [1, 2, 3, 4, 5] } }
     });
- 
+
     let auth = await sdLogin(false);
     let r = await fetch(`https://${domain}/api/v2`, {
       method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(makeBody(auth))
@@ -109,10 +148,10 @@ app.post('/api/sd/order', async (req, res) => {
       j = await r.json();
     }
     if (!j.status) return res.json({ found: false, error: (j.error && j.error.message) || 'Ошибка SalesDoctor' });
- 
+
     const orders = (j.result && j.result.order) || [];
     if (!orders.length) return res.json({ found: false });
- 
+
     const o = orders[0];
     res.json({
       found: true,
@@ -133,14 +172,14 @@ app.post('/api/sd/order', async (req, res) => {
     res.status(502).json({ error: err.message });
   }
 });
- 
+
 /* ============================================================
    3. Telegram — отправка уведомления
    ============================================================ */
 function managerMap() {
   try { return JSON.parse(process.env.MANAGER_MAP || '{}'); } catch (e) { return {}; }
 }
- 
+
 app.post('/api/telegram/send', async (req, res) => {
   const token = process.env.TELEGRAM_BOT_TOKEN;
   if (!token) return res.status(400).json({ error: 'Telegram не настроен (TELEGRAM_BOT_TOKEN).' });
@@ -151,7 +190,7 @@ app.post('/api/telegram/send', async (req, res) => {
     if (!chatId) chatId = process.env.TELEGRAM_DEFAULT_CHAT_ID;
     if (!chatId) return res.status(400).json({ error: 'Нет chat_id (укажите TELEGRAM_DEFAULT_CHAT_ID).' });
     if (!text)   return res.status(400).json({ error: 'Пустой текст сообщения.' });
- 
+
     const r = await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ chat_id: chatId, text, parse_mode: 'HTML', disable_web_page_preview: true })
@@ -163,7 +202,7 @@ app.post('/api/telegram/send', async (req, res) => {
     res.status(502).json({ error: err.message });
   }
 });
- 
+
 /* ============================================================
    4. Статус конфигурации — что включено на сервере
    ============================================================ */
@@ -174,9 +213,8 @@ app.get('/api/config', (req, res) => {
     sdIdType: process.env.SD_ID_TYPE || 'code_1C'
   });
 });
- 
+
 app.get('*', (req, res) => res.sendFile(path.join(__dirname, 'public', 'index.html')));
- 
+
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log(`✅ Сервер запущен на порту ${PORT}`));
- 
