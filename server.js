@@ -1,9 +1,64 @@
 const express = require('express');
 const path    = require('path');
+const { Pool } = require('pg');
 
 const app = express();
 app.use(express.json({ limit: '50mb' }));
 app.use(express.static(path.join(__dirname, 'public')));
+
+/* ============================================================
+   База данных PostgreSQL (Railway). Если DATABASE_URL не задан —
+   программа работает как раньше, просто без сохранения в базу.
+   ============================================================ */
+const pool = process.env.DATABASE_URL ? new Pool({ connectionString: process.env.DATABASE_URL }) : null;
+
+async function initDb() {
+  if (!pool) { console.log('ℹ️ DATABASE_URL не задан — база отключена'); return; }
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS invoices (
+      id BIGSERIAL PRIMARY KEY,
+      doc_key TEXT UNIQUE,
+      invoice_number TEXT,
+      invoice_date TEXT,
+      invoice_date_iso DATE,
+      customer_name TEXT,
+      inn TEXT,
+      delivery_point TEXT,
+      order_number TEXT,
+      total_amount NUMERIC,
+      vat_amount NUMERIC,
+      manual_correction TEXT,
+      correction_comment TEXT,
+      recognition_status TEXT,
+      confidence_score REAL,
+      crm_found BOOLEAN,
+      crm_sd_id TEXT,
+      crm_invoice_number TEXT,
+      crm_total NUMERIC,
+      crm_diff NUMERIC,
+      crm_match BOOLEAN,
+      crm_agent TEXT,
+      file_name TEXT,
+      page_number INT,
+      image_base64 TEXT,
+      image_media_type TEXT,
+      operator TEXT,
+      uploaded_at TEXT,
+      saved_at TIMESTAMPTZ DEFAULT NOW()
+    );
+    CREATE INDEX IF NOT EXISTS idx_inv_num ON invoices(invoice_number);
+    CREATE INDEX IF NOT EXISTS idx_inv_inn ON invoices(inn);
+    CREATE INDEX IF NOT EXISTS idx_inv_date ON invoices(invoice_date_iso);
+    CREATE INDEX IF NOT EXISTS idx_inv_cust ON invoices(customer_name);
+  `);
+  console.log('✅ База данных готова (таблица invoices)');
+}
+initDb().catch(e => console.error('Ошибка инициализации базы:', e.message));
+
+function dateToIso(d) {
+  const m = (d || '').toString().match(/(\d{1,2})[.\-/](\d{1,2})[.\-/](\d{4})/);
+  return m ? `${m[3]}-${m[2].padStart(2, '0')}-${m[1].padStart(2, '0')}` : null;
+}
 
 /* ============================================================
    1. Claude API — распознавание (безопасный прокси)
@@ -217,12 +272,82 @@ app.post('/api/telegram/send', async (req, res) => {
 });
 
 /* ============================================================
-   4. Статус конфигурации — что включено на сервере
+   4. База данных накладных — сохранение, поиск, получение скана
+   ============================================================ */
+app.post('/api/invoices', async (req, res) => {
+  if (!pool) return res.status(400).json({ error: 'База не подключена (DATABASE_URL).' });
+  try {
+    const b = req.body || {};
+    if (!b.doc_key) return res.status(400).json({ error: 'Нет doc_key' });
+    await pool.query(`
+      INSERT INTO invoices
+        (doc_key, invoice_number, invoice_date, invoice_date_iso, customer_name, inn, delivery_point, order_number,
+         total_amount, vat_amount, manual_correction, correction_comment, recognition_status, confidence_score,
+         crm_found, crm_sd_id, crm_invoice_number, crm_total, crm_diff, crm_match, crm_agent,
+         file_name, page_number, image_base64, image_media_type, operator, uploaded_at, saved_at)
+      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27, NOW())
+      ON CONFLICT (doc_key) DO UPDATE SET
+        invoice_number=$2, invoice_date=$3, invoice_date_iso=$4, customer_name=$5, inn=$6, delivery_point=$7, order_number=$8,
+        total_amount=$9, vat_amount=$10, manual_correction=$11, correction_comment=$12, recognition_status=$13, confidence_score=$14,
+        crm_found=$15, crm_sd_id=$16, crm_invoice_number=$17, crm_total=$18, crm_diff=$19, crm_match=$20, crm_agent=$21,
+        file_name=$22, page_number=$23, image_base64=COALESCE($24, invoices.image_base64), image_media_type=$25, operator=$26, uploaded_at=$27, saved_at=NOW()
+    `, [
+      b.doc_key, b.invoice_number || null, b.invoice_date || null, dateToIso(b.invoice_date), b.customer_name || null, b.inn || null,
+      b.delivery_point || null, b.order_number || null,
+      num(b.total_amount), num(b.vat_amount), b.manual_correction || null, b.correction_comment || null, b.recognition_status || null, num(b.confidence_score),
+      b.crm_found ?? null, b.crm_sd_id || null, b.crm_invoice_number || null, num(b.crm_total), num(b.crm_diff), b.crm_match ?? null, b.crm_agent || null,
+      b.file_name || null, b.page_number || null, b.image_base64 || null, b.image_media_type || null, b.operator || null, b.uploaded_at || null
+    ]);
+    res.json({ ok: true });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+app.get('/api/invoices', async (req, res) => {
+  if (!pool) return res.status(400).json({ error: 'База не подключена.' });
+  try {
+    const q = (req.query.q || '').toString().trim();
+    const inn = (req.query.inn || '').toString().trim();
+    const from = (req.query.from || '').toString().trim();
+    const to = (req.query.to || '').toString().trim();
+    const status = (req.query.status || '').toString().trim();   // ok | review | mismatch | corr
+    const where = []; const p = [];
+    if (q) { p.push('%' + q + '%'); const i = p.length; where.push(`(invoice_number ILIKE $${i} OR customer_name ILIKE $${i} OR delivery_point ILIKE $${i} OR order_number ILIKE $${i})`); }
+    if (inn) { p.push(inn + '%'); where.push(`inn ILIKE $${p.length}`); }
+    if (from) { p.push(from); where.push(`invoice_date_iso >= $${p.length}`); }
+    if (to) { p.push(to); where.push(`invoice_date_iso <= $${p.length}`); }
+    if (status === 'mismatch') where.push(`crm_match = false`);
+    if (status === 'corr') where.push(`manual_correction = 'Да'`);
+    if (status === 'ok') where.push(`recognition_status = 'OK'`);
+    if (status === 'review') where.push(`recognition_status <> 'OK'`);
+    const sql = `SELECT id, invoice_number, invoice_date, customer_name, inn, delivery_point, order_number,
+      total_amount, vat_amount, manual_correction, recognition_status, crm_found, crm_total, crm_diff, crm_match, crm_agent, file_name, page_number, saved_at
+      FROM invoices ${where.length ? 'WHERE ' + where.join(' AND ') : ''}
+      ORDER BY invoice_date_iso DESC NULLS LAST, saved_at DESC LIMIT 500`;
+    const r = await pool.query(sql, p);
+    res.json({ count: r.rows.length, rows: r.rows });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+app.get('/api/invoices/:id/image', async (req, res) => {
+  if (!pool) return res.status(400).json({ error: 'База не подключена.' });
+  try {
+    const r = await pool.query('SELECT image_base64, image_media_type FROM invoices WHERE id=$1', [req.params.id]);
+    if (!r.rows.length || !r.rows[0].image_base64) return res.status(404).json({ error: 'Скан не найден' });
+    res.json({ dataUrl: 'data:' + (r.rows[0].image_media_type || 'image/jpeg') + ';base64,' + r.rows[0].image_base64 });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+/* небольшой помощник для чисел */
+function num(v) { if (v === '' || v === null || v === undefined) return null; const n = Number(v); return isNaN(n) ? null : n; }
+
+/* ============================================================
+   5. Статус конфигурации — что включено на сервере
    ============================================================ */
 app.get('/api/config', (req, res) => {
   res.json({
     sd:       !!(process.env.SD_DOMAIN && process.env.SD_LOGIN && process.env.SD_PASSWORD),
     telegram: !!process.env.TELEGRAM_BOT_TOKEN,
+    db:       !!pool,
     sdIdType: process.env.SD_ID_TYPE || 'code_1C'
   });
 });
