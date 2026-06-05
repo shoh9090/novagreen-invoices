@@ -449,7 +449,7 @@ async function recognizeAll(){
 }
 async function recognizePage(p){
   const resp=await fetch("/api/claude",{method:"POST",headers:{"Content-Type":"application/json"},
-    body:JSON.stringify({model:"claude-sonnet-4-20250514",max_tokens:1000,messages:[{role:"user",content:[
+    body:JSON.stringify({model:"claude-sonnet-4-6",max_tokens:1000,messages:[{role:"user",content:[
       {type:"image",source:{type:"base64",media_type:p.mediaType,data:p.b64}},{type:"text",text:PROMPT}]}]})});
   if(!resp.ok) throw new Error('HTTP '+resp.status);
   const data=await resp.json();
@@ -483,14 +483,14 @@ function markError(p,e){ p.status='error'; p.fields.recognition_status='Ошиб
 let verifying=false;
 async function verifyAll(){
   if(verifying||!CONFIG.sd) { if(!CONFIG.sd) showToast('CRM не подключена. Настройте на сервере.',true); return; }
-  const rows=pages.filter(p=>p.status==='done' && p.fields.order_number);
+  const rows=pages.filter(p=>p.status==='done' && p.fields.invoice_number && p.fields.invoice_number!=='Не распознано');
   if(!rows.length){ showToast('Нет распознанных номеров заказа для сверки'); return; }
   verifying=true; updateButtons();
   let done=0; const total=rows.length; renderProgress('Сверка с SalesDoctor',done,total,true);
   for(const p of rows){
     p.sdStatus='loading'; renderTable();
     try{
-      const r=await fetch('/api/sd/order',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({orderNumber:p.fields.order_number})});
+      const r=await fetch('/api/sd/order',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({invoiceNumber:p.fields.invoice_number,date:p.fields.invoice_date,point:p.fields.delivery_point,customer:p.fields.customer_name})});
       const j=await r.json();
       if(r.ok && j.found){ p.sd=j.order; p.sdStatus='found'; computeCompare(p); }
       else if(r.ok && !j.found){ p.sd=null; p.compare=null; p.sdStatus='notfound'; p.sdError=j.error||''; }
@@ -630,7 +630,7 @@ function updateButtons(){
   const hasPending=pages.some(p=>p.status==='pending'||p.status==='error');
   const recognized=pages.filter(p=>p.status==='done');
   $('#btnRecognize').disabled=running||verifying||!hasPending;
-  $('#btnVerify').disabled=running||verifying||!CONFIG.sd||!recognized.some(p=>p.fields.order_number);
+  $('#btnVerify').disabled=running||verifying||!CONFIG.sd||!recognized.some(p=>p.fields.invoice_number && p.fields.invoice_number!=='Не распознано');
   $('#btnNotify').disabled=running||verifying||!CONFIG.telegram||!pages.some(p=>p.compare&&!p.compare.match&&!p.notified);
   $('#btnClear').disabled=running||verifying||!pages.length;
   $('#btnExport').disabled=!pages.some(p=>p.status==='done'||p.status==='error');
@@ -681,9 +681,9 @@ function renderEditor(p){
 }
 async function verifyOne(p){
   if(!CONFIG.sd){ showToast('CRM не подключена',true); p.sdStatus='none'; return; }
-  if(!p.fields.order_number){ showToast('Не распознан номер заказа',true); p.sdStatus='none'; return; }
+  if(!p.fields.invoice_number || p.fields.invoice_number==='Не распознано'){ showToast('Не распознан номер счёт-фактуры',true); p.sdStatus='none'; return; }
   try{
-    const r=await fetch('/api/sd/order',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({orderNumber:p.fields.order_number})});
+    const r=await fetch('/api/sd/order',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({invoiceNumber:p.fields.invoice_number,date:p.fields.invoice_date,point:p.fields.delivery_point,customer:p.fields.customer_name})});
     const j=await r.json();
     if(r.ok&&j.found){ p.sd=j.order; p.sdStatus='found'; computeCompare(p); }
     else if(r.ok&&!j.found){ p.sd=null; p.compare=null; p.sdStatus='notfound'; p.sdError=j.error||''; }
@@ -693,15 +693,16 @@ async function verifyOne(p){
 }
 function renderCrm(p){
   if(!CONFIG.sd) return `<div class="note-info">CRM SalesDoctor не подключена. Включите её на сервере (переменные <b>SD_DOMAIN / SD_LOGIN / SD_PASSWORD</b>), чтобы сверять заказы.</div>`;
-  if(p.sdStatus==='none') return `<div class="note-info" style="display:flex;justify-content:space-between;align-items:center;gap:12px">Заказ ещё не сверялся.<button class="btn btn-blue" id="dmVerifyBtn" style="padding:8px 14px">Сверить заказ ${esc(p.fields.order_number||'')}</button></div>`;
+  if(p.sdStatus==='none') return `<div class="note-info" style="display:flex;justify-content:space-between;align-items:center;gap:12px">Заказ ещё не сверялся.<button class="btn btn-blue" id="dmVerifyBtn" style="padding:8px 14px">Сверить с CRM (СФ ${esc(p.fields.invoice_number||'')})</button></div>`;
   if(p.sdStatus==='loading') return `<div class="note-info">Запрашиваю заказ в SalesDoctor…</div>`;
   if(p.sdStatus==='error') return `<div class="note-warn"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M12 8v4M12 16h.01"/></svg><span>Ошибка сверки: ${esc(p.sdError||'неизвестно')}. <button class="btn btn-blue" id="dmVerifyBtn" style="padding:5px 11px;margin-left:6px">Повторить</button></span></div>`;
-  if(p.sdStatus==='notfound') return `<div class="note-warn"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M12 8v4M12 16h.01"/></svg><span>Заказ <b>${esc(p.fields.order_number||'')}</b> не найден в SalesDoctor. Проверьте номер или тип идентификатора. <button class="btn btn-blue" id="dmVerifyBtn" style="padding:5px 11px;margin-left:6px">Повторить</button></span></div>`;
+  if(p.sdStatus==='notfound') return `<div class="note-warn"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M12 8v4M12 16h.01"/></svg><span>Заказ по СФ <b>${esc(p.fields.invoice_number||'')}</b> (${esc(p.fields.invoice_date||'')}, ${esc(p.fields.delivery_point||'')}) не найден в SalesDoctor за эту дату. <button class="btn btn-blue" id="dmVerifyBtn" style="padding:5px 11px;margin-left:6px">Повторить</button></span></div>`;
   const sd=p.sd, c=p.compare;
   const ag=(sd.agent&&sd.agent.code_1C)||'—'; const ex=(sd.expeditor&&sd.expeditor.code_1C)||'—';
   return `<div class="crm-card">
     <div class="crm-row"><span class="k">Заказ в CRM</span><span class="v tnum">${esc(sd.code_1C||sd.SD_id||'—')}</span></div>
     ${sd.invoiceNumber?`<div class="crm-row"><span class="k">Накладная CRM</span><span class="v tnum">${esc(sd.invoiceNumber)}</span></div>`:''}
+    ${sd.comment?`<div class="crm-row"><span class="k">Заказ (комментарий)</span><span class="v tnum">${esc(sd.comment)}</span></div>`:''}
     <div class="crm-row"><span class="k">Клиент</span><span class="v">${esc((sd.client&&(sd.client.clientName||sd.client.clientLegalName))||'—')}</span></div>
     <div class="crm-row"><span class="k">Агент / Экспедитор</span><span class="v tnum">${esc(ag)} / ${esc(ex)}</span></div>
     <div class="crm-row"><span class="k">Возвраты</span><span class="v tnum">${fmtNum(sd.totalReturnsSumma)} сум (${sd.totalReturnsCount||0} шт.)</span></div>
