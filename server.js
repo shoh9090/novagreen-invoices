@@ -7,6 +7,49 @@ app.use(express.json({ limit: '50mb' }));
 app.use(express.static(path.join(__dirname, 'public')));
 
 /* ============================================================
+   Хранилище сканов Cloudflare R2 (S3-совместимое). Подключается
+   только если заданы переменные R2_*; иначе сканы хранятся в базе.
+   Библиотека грузится «лениво», чтобы без R2 ничего не падало.
+   ============================================================ */
+const R2_BUCKET = process.env.R2_BUCKET || '';
+const r2Configured = !!(process.env.R2_ACCOUNT_ID && process.env.R2_ACCESS_KEY_ID && process.env.R2_SECRET_ACCESS_KEY && R2_BUCKET);
+let S3Client, PutObjectCommand, GetObjectCommand, DeleteObjectCommand;
+if (r2Configured) {
+  try { ({ S3Client, PutObjectCommand, GetObjectCommand, DeleteObjectCommand } = require('@aws-sdk/client-s3')); }
+  catch (e) { console.error('⚠️ Не установлен @aws-sdk/client-s3 — обновите package.json. R2 отключён.', e.message); }
+}
+const r2 = (r2Configured && S3Client)
+  ? new S3Client({
+      region: 'auto',
+      endpoint: `https://${process.env.R2_ACCOUNT_ID}.r2.cloudflarestorage.com`,
+      credentials: { accessKeyId: process.env.R2_ACCESS_KEY_ID, secretAccessKey: process.env.R2_SECRET_ACCESS_KEY }
+    })
+  : null;
+console.log(r2 ? '✅ Cloudflare R2 подключён (bucket: ' + R2_BUCKET + ')' : 'ℹ️ R2 не настроен — сканы в базе');
+
+function keyForDoc(docKey, mediaType) {
+  const ext = (mediaType || '').includes('png') ? 'png' : 'jpg';
+  const safe = (docKey || 'doc').replace(/[^a-zA-Z0-9_\-]+/g, '_').slice(0, 80);
+  return `invoices/${safe}.${ext}`;
+}
+async function r2Upload(docKey, base64, mediaType) {
+  if (!r2 || !base64) return null;
+  const key = keyForDoc(docKey, mediaType);
+  await r2.send(new PutObjectCommand({ Bucket: R2_BUCKET, Key: key, Body: Buffer.from(base64, 'base64'), ContentType: mediaType || 'image/jpeg' }));
+  return key;
+}
+async function r2GetDataUrl(key, mediaType) {
+  if (!r2 || !key) return null;
+  const resp = await r2.send(new GetObjectCommand({ Bucket: R2_BUCKET, Key: key }));
+  const bytes = await resp.Body.transformToByteArray();
+  return 'data:' + (mediaType || resp.ContentType || 'image/jpeg') + ';base64,' + Buffer.from(bytes).toString('base64');
+}
+async function r2Delete(key) {
+  if (!r2 || !key) return;
+  try { await r2.send(new DeleteObjectCommand({ Bucket: R2_BUCKET, Key: key })); } catch (e) { /* не критично */ }
+}
+
+/* ============================================================
    База данных PostgreSQL (Railway). Если DATABASE_URL не задан —
    программа работает как раньше, просто без сохранения в базу.
    ============================================================ */
@@ -51,6 +94,7 @@ async function initDb() {
     CREATE INDEX IF NOT EXISTS idx_inv_date ON invoices(invoice_date_iso);
     CREATE INDEX IF NOT EXISTS idx_inv_cust ON invoices(customer_name);
   `);
+  await pool.query(`ALTER TABLE invoices ADD COLUMN IF NOT EXISTS image_key TEXT;`);
   console.log('✅ База данных готова (таблица invoices)');
 }
 initDb().catch(e => console.error('Ошибка инициализации базы:', e.message));
@@ -59,6 +103,121 @@ function dateToIso(d) {
   const m = (d || '').toString().match(/(\d{1,2})[.\-/](\d{1,2})[.\-/](\d{4})/);
   return m ? `${m[3]}-${m[2].padStart(2, '0')}-${m[1].padStart(2, '0')}` : null;
 }
+
+/* ============================================================
+   Авторизация. Включается, когда задан AUTH_SECRET (и есть база).
+   Пока AUTH_SECRET не задан — программа открыта, как раньше.
+   ============================================================ */
+const crypto = require('crypto');
+const AUTH_SECRET = process.env.AUTH_SECRET || '';
+const AUTH_ON = !!(AUTH_SECRET && pool);
+
+function hashPassword(pw) {
+  const salt = crypto.randomBytes(16).toString('hex');
+  const hash = crypto.scryptSync(String(pw), salt, 64).toString('hex');
+  return `scrypt$${salt}$${hash}`;
+}
+function verifyPassword(pw, stored) {
+  try {
+    const parts = String(stored).split('$'); const salt = parts[1], hash = parts[2];
+    const h = crypto.scryptSync(String(pw), salt, 64).toString('hex');
+    return crypto.timingSafeEqual(Buffer.from(h, 'hex'), Buffer.from(hash, 'hex'));
+  } catch (e) { return false; }
+}
+function b64url(buf) { return Buffer.from(buf).toString('base64').replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, ''); }
+function signToken(payload) {
+  const body = b64url(JSON.stringify(payload));
+  const sig = b64url(crypto.createHmac('sha256', AUTH_SECRET).update(body).digest());
+  return body + '.' + sig;
+}
+function verifyToken(token) {
+  try {
+    const [body, sig] = String(token).split('.'); if (!body || !sig) return null;
+    const exp = b64url(crypto.createHmac('sha256', AUTH_SECRET).update(body).digest());
+    if (sig.length !== exp.length || !crypto.timingSafeEqual(Buffer.from(sig), Buffer.from(exp))) return null;
+    const p = JSON.parse(Buffer.from(body.replace(/-/g, '+').replace(/_/g, '/'), 'base64').toString());
+    if (p.exp && Date.now() > p.exp) return null;
+    return p;
+  } catch (e) { return null; }
+}
+async function initUsers() {
+  if (!pool || !AUTH_ON) { if (AUTH_SECRET && !pool) console.log('⚠️ AUTH_SECRET задан, но нет базы — авторизация не включится'); return; }
+  await pool.query(`CREATE TABLE IF NOT EXISTS users (
+    id BIGSERIAL PRIMARY KEY, username TEXT UNIQUE NOT NULL, password_hash TEXT NOT NULL,
+    full_name TEXT, role TEXT DEFAULT 'accountant', active BOOLEAN DEFAULT true, created_at TIMESTAMPTZ DEFAULT NOW());`);
+  const login = process.env.ADMIN_LOGIN, pw = process.env.ADMIN_PASSWORD;
+  if (login && pw) {
+    await pool.query(`INSERT INTO users (username,password_hash,full_name,role,active)
+      VALUES ($1,$2,'Администратор','admin',true)
+      ON CONFLICT (username) DO UPDATE SET password_hash=$2, role='admin', active=true`, [login, hashPassword(pw)]);
+    console.log('✅ Администратор обеспечен: ' + login);
+  } else {
+    console.log('⚠️ Не заданы ADMIN_LOGIN/ADMIN_PASSWORD — некому будет войти!');
+  }
+  console.log('🔐 Авторизация ВКЛЮЧЕНА');
+}
+initUsers().catch(e => console.error('Ошибка инициализации пользователей:', e.message));
+
+// Middleware: защищаем все /api/* кроме входа и конфига
+app.use((req, res, next) => {
+  if (!AUTH_ON) return next();
+  if (!req.path.startsWith('/api/')) return next();
+  if (req.path === '/api/login' || req.path === '/api/config') return next();
+  const h = req.headers.authorization || ''; const t = h.startsWith('Bearer ') ? h.slice(7) : '';
+  const p = verifyToken(t);
+  if (!p) return res.status(401).json({ error: 'Требуется вход в систему' });
+  req.user = p; next();
+});
+function adminOnly(req, res, next) {
+  if (AUTH_ON && (!req.user || req.user.role !== 'admin')) return res.status(403).json({ error: 'Доступ только для администратора' });
+  next();
+}
+
+app.post('/api/login', async (req, res) => {
+  if (!AUTH_ON) return res.json({ ok: true, authDisabled: true });
+  const { username, password } = req.body || {};
+  if (!username || !password) return res.status(400).json({ error: 'Введите логин и пароль' });
+  try {
+    const r = await pool.query('SELECT * FROM users WHERE username=$1 AND active=true', [username]);
+    if (!r.rows.length || !verifyPassword(password, r.rows[0].password_hash)) return res.status(401).json({ error: 'Неверный логин или пароль' });
+    const u = r.rows[0];
+    const token = signToken({ uid: u.id, username: u.username, role: u.role, name: u.full_name, exp: Date.now() + 7 * 24 * 3600 * 1000 });
+    res.json({ token, user: { username: u.username, name: u.full_name, role: u.role } });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+app.get('/api/me', (req, res) => {
+  if (!AUTH_ON) return res.json({ authDisabled: true });
+  res.json({ user: { username: req.user.username, name: req.user.name, role: req.user.role } });
+});
+
+// Управление пользователями (для админ-панели, Этап Б)
+app.get('/api/users', adminOnly, async (req, res) => {
+  if (!pool) return res.status(400).json({ error: 'Нет базы' });
+  const r = await pool.query('SELECT id,username,full_name,role,active,created_at FROM users ORDER BY created_at');
+  res.json({ rows: r.rows });
+});
+app.post('/api/users', adminOnly, async (req, res) => {
+  if (!pool) return res.status(400).json({ error: 'Нет базы' });
+  const { username, password, full_name, role } = req.body || {};
+  if (!username || !password) return res.status(400).json({ error: 'Нужны логин и пароль' });
+  try {
+    await pool.query(`INSERT INTO users (username,password_hash,full_name,role,active) VALUES ($1,$2,$3,$4,true)
+      ON CONFLICT (username) DO UPDATE SET password_hash=$2, full_name=$3, role=$4, active=true`,
+      [username, hashPassword(password), full_name || null, (role === 'admin' ? 'admin' : 'accountant')]);
+    res.json({ ok: true });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+app.post('/api/users/:id', adminOnly, async (req, res) => {
+  if (!pool) return res.status(400).json({ error: 'Нет базы' });
+  const { active, password, full_name, role } = req.body || {};
+  try {
+    if (password) await pool.query('UPDATE users SET password_hash=$1 WHERE id=$2', [hashPassword(password), req.params.id]);
+    if (typeof active === 'boolean') await pool.query('UPDATE users SET active=$1 WHERE id=$2', [active, req.params.id]);
+    if (full_name !== undefined) await pool.query('UPDATE users SET full_name=$1 WHERE id=$2', [full_name, req.params.id]);
+    if (role) await pool.query('UPDATE users SET role=$1 WHERE id=$2', [(role === 'admin' ? 'admin' : 'accountant'), req.params.id]);
+    res.json({ ok: true });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
 
 /* ============================================================
    1. Claude API — распознавание (безопасный прокси)
@@ -279,24 +438,36 @@ app.post('/api/invoices', async (req, res) => {
   try {
     const b = req.body || {};
     if (!b.doc_key) return res.status(400).json({ error: 'Нет doc_key' });
+
+    // Скан: если есть R2 — грузим туда; иначе (или при сбое) — храним в базе
+    let imageKey = null, base64ToStore = null;
+    if (b.image_base64) {
+      if (r2) {
+        try { imageKey = await r2Upload(b.doc_key, b.image_base64, b.image_media_type); }
+        catch (e) { console.error('R2 upload error:', e.message); }
+      }
+      if (!imageKey) base64ToStore = b.image_base64;
+    }
+
     await pool.query(`
       INSERT INTO invoices
         (doc_key, invoice_number, invoice_date, invoice_date_iso, customer_name, inn, delivery_point, order_number,
          total_amount, vat_amount, manual_correction, correction_comment, recognition_status, confidence_score,
          crm_found, crm_sd_id, crm_invoice_number, crm_total, crm_diff, crm_match, crm_agent,
-         file_name, page_number, image_base64, image_media_type, operator, uploaded_at, saved_at)
-      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27, NOW())
+         file_name, page_number, image_base64, image_media_type, operator, uploaded_at, image_key, saved_at)
+      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28, NOW())
       ON CONFLICT (doc_key) DO UPDATE SET
         invoice_number=$2, invoice_date=$3, invoice_date_iso=$4, customer_name=$5, inn=$6, delivery_point=$7, order_number=$8,
         total_amount=$9, vat_amount=$10, manual_correction=$11, correction_comment=$12, recognition_status=$13, confidence_score=$14,
         crm_found=$15, crm_sd_id=$16, crm_invoice_number=$17, crm_total=$18, crm_diff=$19, crm_match=$20, crm_agent=$21,
-        file_name=$22, page_number=$23, image_base64=COALESCE($24, invoices.image_base64), image_media_type=$25, operator=$26, uploaded_at=$27, saved_at=NOW()
+        file_name=$22, page_number=$23, image_base64=COALESCE($24, invoices.image_base64), image_media_type=$25, operator=$26, uploaded_at=$27,
+        image_key=COALESCE($28, invoices.image_key), saved_at=NOW()
     `, [
       b.doc_key, b.invoice_number || null, b.invoice_date || null, dateToIso(b.invoice_date), b.customer_name || null, b.inn || null,
       b.delivery_point || null, b.order_number || null,
       num(b.total_amount), num(b.vat_amount), b.manual_correction || null, b.correction_comment || null, b.recognition_status || null, num(b.confidence_score),
       b.crm_found ?? null, b.crm_sd_id || null, b.crm_invoice_number || null, num(b.crm_total), num(b.crm_diff), b.crm_match ?? null, b.crm_agent || null,
-      b.file_name || null, b.page_number || null, b.image_base64 || null, b.image_media_type || null, b.operator || null, b.uploaded_at || null
+      b.file_name || null, b.page_number || null, base64ToStore, b.image_media_type || null, b.operator || null, b.uploaded_at || null, imageKey
     ]);
     res.json({ ok: true });
   } catch (err) { res.status(500).json({ error: err.message }); }
@@ -331,9 +502,15 @@ app.get('/api/invoices', async (req, res) => {
 app.get('/api/invoices/:id/image', async (req, res) => {
   if (!pool) return res.status(400).json({ error: 'База не подключена.' });
   try {
-    const r = await pool.query('SELECT image_base64, image_media_type FROM invoices WHERE id=$1', [req.params.id]);
-    if (!r.rows.length || !r.rows[0].image_base64) return res.status(404).json({ error: 'Скан не найден' });
-    res.json({ dataUrl: 'data:' + (r.rows[0].image_media_type || 'image/jpeg') + ';base64,' + r.rows[0].image_base64 });
+    const r = await pool.query('SELECT image_base64, image_media_type, image_key FROM invoices WHERE id=$1', [req.params.id]);
+    if (!r.rows.length) return res.status(404).json({ error: 'Скан не найден' });
+    const row = r.rows[0];
+    if (row.image_key && r2) {
+      try { const dataUrl = await r2GetDataUrl(row.image_key, row.image_media_type); if (dataUrl) return res.json({ dataUrl }); }
+      catch (e) { console.error('R2 get error:', e.message); }
+    }
+    if (row.image_base64) return res.json({ dataUrl: 'data:' + (row.image_media_type || 'image/jpeg') + ';base64,' + row.image_base64 });
+    return res.status(404).json({ error: 'Скан не найден' });
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
@@ -345,8 +522,29 @@ app.post('/api/invoices/delete', async (req, res) => {
   const ids = (req.body && req.body.ids) || [];
   if (!Array.isArray(ids) || !ids.length) return res.status(400).json({ error: 'Не переданы id' });
   try {
+    // сначала забираем ключи R2, чтобы удалить файлы из хранилища
+    const keys = await pool.query('SELECT image_key FROM invoices WHERE id = ANY($1::bigint[]) AND image_key IS NOT NULL', [ids]);
     const r = await pool.query('DELETE FROM invoices WHERE id = ANY($1::bigint[])', [ids]);
+    for (const row of keys.rows) await r2Delete(row.image_key);
     res.json({ ok: true, deleted: r.rowCount });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+/* Перенос старых сканов из базы в R2: открыть /api/migrate-to-r2 */
+app.get('/api/migrate-to-r2', async (req, res) => {
+  if (!pool) return res.status(400).json({ error: 'База не подключена.' });
+  if (!r2) return res.status(400).json({ error: 'R2 не настроен — добавьте переменные R2_* в Railway.' });
+  try {
+    const r = await pool.query("SELECT id, doc_key, image_base64, image_media_type FROM invoices WHERE image_base64 IS NOT NULL AND image_key IS NULL LIMIT 500");
+    let moved = 0, failed = 0;
+    for (const row of r.rows) {
+      try {
+        const key = await r2Upload(row.doc_key, row.image_base64, row.image_media_type);
+        if (key) { await pool.query('UPDATE invoices SET image_key=$1, image_base64=NULL WHERE id=$2', [key, row.id]); moved++; }
+        else failed++;
+      } catch (e) { failed++; }
+    }
+    res.json({ ok: true, moved, failed, remaining_checked: r.rows.length });
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
@@ -358,6 +556,8 @@ app.get('/api/config', (req, res) => {
     sd:       !!(process.env.SD_DOMAIN && process.env.SD_LOGIN && process.env.SD_PASSWORD),
     telegram: !!process.env.TELEGRAM_BOT_TOKEN,
     db:       !!pool,
+    r2:       !!r2,
+    auth:     AUTH_ON,
     sdIdType: process.env.SD_ID_TYPE || 'code_1C'
   });
 });
