@@ -379,7 +379,7 @@ input[type=range]{accent-color:var(--lime-d)}
       <table>
         <thead><tr>
           <th class="chk"><input type="checkbox" id="regAll" title="Выбрать все"></th>
-          <th>№ СФ</th><th>Дата</th><th>Контрагент</th><th>ИНН</th><th>Точка</th>
+          <th>№ СФ</th><th>Дата</th><th>Контрагент</th><th>ИНН</th><th>Точка</th><th>Агент</th>
           <th class="r">Сумма</th><th>Исправл.</th><th>Сверка CRM</th><th>Статус</th>
         </tr></thead>
         <tbody id="regBody"></tbody>
@@ -456,14 +456,14 @@ input[type=range]{accent-color:var(--lime-d)}
       <button class="icon-btn" id="botClose"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 6L6 18M6 6l12 12"/></svg></button>
     </div>
     <div class="modal-body" style="display:block;padding:20px 22px;overflow:auto">
-      <div class="ms" style="margin-bottom:12px">Агент пишет боту, делится номером — заявка появляется здесь. Подтвердите её и при желании впишите <b>код агента из CRM</b> (для адресных уведомлений на следующем шаге).</div>
+      <div class="ms" style="margin-bottom:12px">Сначала нажмите <b>«Загрузить агентов из CRM»</b> — программа подтянет список из SalesDoctor. Когда агент пишет боту и делится номером, он <b>сам привязывается по телефону</b>. Если нет — выберите его из списка вручную. Затем нажмите «Подтвердить».</div>
       <div class="tbl-wrap"><table>
         <thead><tr><th>Телефон</th><th>Имя в Telegram</th><th>Агент в CRM (имя/код)</th><th>Статус</th><th>Действия</th></tr></thead>
         <tbody id="botBody"></tbody>
       </table></div>
       <datalist id="agentsSeen"></datalist>
     </div>
-    <div class="modal-ft"><div class="grow"></div><button class="btn btn-ghost" id="botRefresh">Обновить</button><button class="btn btn-ghost" id="botCloseBtn">Закрыть</button></div>
+    <div class="modal-ft"><div class="grow"></div><button class="btn btn-blue" id="botSync">🔄 Загрузить агентов из CRM</button><button class="btn btn-ghost" id="botRefresh">Обновить</button><button class="btn btn-ghost" id="botCloseBtn">Закрыть</button></div>
   </div>
 </div>
 
@@ -519,7 +519,8 @@ let CONFIG = { sd:false, telegram:false, sdIdType:'code_1C' };
 const $ = s => document.querySelector(s);
 const num = v => { if(typeof v==='number') return v; if(v==null||v==='') return ''; const d=String(v).replace(/[^\d.-]/g,''); return d===''?'':parseFloat(d); };
 const fmtNum = n => (n===''||n==null||isNaN(n)) ? '—' : Math.round(Number(n)).toLocaleString('ru-RU');
-const agentRef = sd => { const a=sd&&sd.agent; return a ? (a.agentName||a.name||a.fio||a.code_1C||a.SD_id||'') : ''; };
+const agentId = sd => { const a=sd&&sd.agent; return a ? (a.SD_id||a.code_1C||a.agentName||a.name||'') : ''; };
+const agentName = sd => { const a=sd&&sd.agent; return a ? (a.agentName||a.name||a.fio||a.code_1C||a.SD_id||'') : ''; };
 const nowStr = () => new Date().toLocaleString('ru-RU',{day:'2-digit',month:'2-digit',year:'numeric',hour:'2-digit',minute:'2-digit'});
 const esc = s => String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 
@@ -603,9 +604,26 @@ $('#usersCloseBtn').onclick=()=>$('#usersOverlay').classList.remove('show');
 $('#nuPass').addEventListener('keydown',e=>{ if(e.key==='Enter') addUser(); });
 
 /* ===== Telegram-агенты (админ) ===== */
-async function openBot(){ $('#botOverlay').classList.add('show'); await loadBotAgents(); loadAgentsSeen(); }
-async function loadAgentsSeen(){
-  try{ const r=await fetch('/api/agents-seen'); const j=await r.json(); if(r.ok){ $('#agentsSeen').innerHTML=(j.rows||[]).map(v=>`<option value="${esc(v)}">`).join(''); } }catch(e){}
+let crmAgents=[];
+async function openBot(){ $('#botOverlay').classList.add('show'); await loadCrmAgents(); await loadBotAgents(); }
+async function loadCrmAgents(){
+  try{ const r=await fetch('/api/crm-agents'); const j=await r.json(); if(r.ok) crmAgents=j.rows||[]; }catch(e){ crmAgents=[]; }
+}
+async function syncAgents(){
+  const b=$('#botSync'); b.disabled=true; const t=b.textContent; b.textContent='Загрузка…';
+  try{
+    const r=await fetch('/api/crm-agents/sync',{method:'POST'}); const j=await r.json();
+    if(r.ok){ showToast('Загружено агентов из CRM: '+j.count); await loadCrmAgents(); await loadBotAgents(); }
+    else showToast('Ошибка: '+(j.error||''),true);
+  }catch(e){ showToast('Ошибка: '+e.message,true); }
+  b.disabled=false; b.textContent=t;
+}
+function agentSelect(id, current){
+  const opts=['<option value="">— не привязан —</option>'].concat(crmAgents.map(a=>{
+    const label=esc((a.name||a.sd_id)+(a.phone?(' (+'+a.phone+')'):''));
+    return `<option value="${esc(a.sd_id)}" ${a.sd_id===current?'selected':''}>${label}</option>`;
+  })).join('');
+  return `<select class="bot-code" data-id="${id}" style="font-size:12.5px;padding:6px 8px;border:1px solid var(--line);border-radius:7px;max-width:200px">${opts}</select>`;
 }
 async function loadBotAgents(){
   const tb=$('#botBody'); tb.innerHTML='<tr><td colspan="5" style="color:#9fb0a4;padding:14px">Загрузка…</td></tr>';
@@ -620,7 +638,7 @@ async function loadBotAgents(){
       return `<tr>
         <td class="tnum">+${esc(a.phone||'—')}</td>
         <td>${esc(a.tg_name||'—')}</td>
-        <td><input class="bot-code" list="agentsSeen" data-id="${a.id}" value="${esc(a.agent_code||'')}" placeholder="имя/код" style="width:120px;font-size:12.5px;padding:6px 8px;border:1px solid var(--line);border-radius:7px"></td>
+        <td>${agentSelect(a.id, a.agent_code||'')}</td>
         <td>${st}</td>
         <td><div class="u-actions">
           ${a.status!=='active'?`<button class="btn btn-dark btn-sm" data-act="active" data-id="${a.id}">Подтвердить</button>`:''}
@@ -628,21 +646,27 @@ async function loadBotAgents(){
         </div></td></tr>`;
     }).join('') : '<tr><td colspan="5" style="color:#9fb0a4;padding:14px">Пока нет заявок. Агенты появятся здесь после /start в боте.</td></tr>';
     tb.querySelectorAll('button[data-act]').forEach(b=>b.onclick=()=>botAction(b.dataset.act,b.dataset.id));
+    tb.querySelectorAll('.bot-code').forEach(s=>s.onchange=()=>botAction('save',s.dataset.id));
   }catch(e){ tb.innerHTML='<tr><td colspan="5" style="padding:14px">Ошибка: '+esc(e.message)+'</td></tr>'; }
 }
 async function botAction(status,id){
-  const codeInput=document.querySelector('.bot-code[data-id="'+id+'"]');
-  const agent_code=codeInput?codeInput.value.trim():undefined;
+  const sel=document.querySelector('.bot-code[data-id="'+id+'"]');
+  const agent_code=sel?sel.value:undefined;
+  const ca=crmAgents.find(a=>a.sd_id===agent_code);
+  const agent_name=ca?ca.name:'';
   if(status==='blocked' && !confirm('Заблокировать агента? Он не сможет запрашивать сканы.')) return;
   try{
-    const r=await fetch('/api/bot-agents/'+id,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({status, agent_code})});
-    if(r.ok){ showToast(status==='active'?'Агент подтверждён':'Готово'); loadBotAgents(); } else showToast('Ошибка',true);
+    const body={ agent_code, agent_name };
+    if(status!=='save') body.status=status;
+    const r=await fetch('/api/bot-agents/'+id,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
+    if(r.ok){ showToast(status==='active'?'Агент подтверждён':(status==='save'?'Привязка сохранена':'Готово')); if(status!=='save') loadBotAgents(); } else showToast('Ошибка',true);
   }catch(e){ showToast('Ошибка: '+e.message,true); }
 }
 $('#btnBot').onclick=openBot;
 $('#botClose').onclick=()=>$('#botOverlay').classList.remove('show');
 $('#botCloseBtn').onclick=()=>$('#botOverlay').classList.remove('show');
 $('#botRefresh').onclick=loadBotAgents;
+$('#botSync').onclick=syncAgents;
 
 /* config */
 fetch('/api/config').then(r=>r.json()).then(async c=>{
@@ -832,7 +856,7 @@ async function saveInvoice(p){
       crm_found: p.sdStatus==='found'?true:(p.sdStatus==='notfound'?false:null),
       crm_sd_id: sd?(sd.code_1C||sd.SD_id):null, crm_invoice_number: sd?sd.invoiceNumber:null,
       crm_total: c?c.crmTotal:null, crm_diff: c?c.diff:null, crm_match: c?c.match:null,
-      crm_agent: agentRef(sd)||null,
+      crm_agent: agentId(sd)||null, crm_agent_name: agentName(sd)||null,
       file_name:p.file_name, page_number:p.page_number,
       image_base64: sendImage?p.b64:null, image_media_type: sendImage?p.mediaType:null,
       operator:operator, uploaded_at:p.uploaded_at
@@ -1033,7 +1057,7 @@ function renderCrm(p){
   if(p.sdStatus==='error') return `<div class="note-warn"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M12 8v4M12 16h.01"/></svg><span>Ошибка сверки: ${esc(p.sdError||'неизвестно')}. <button class="btn btn-blue" id="dmVerifyBtn" style="padding:5px 11px;margin-left:6px">Повторить</button></span></div>`;
   if(p.sdStatus==='notfound') return `<div class="note-warn"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M12 8v4M12 16h.01"/></svg><span>Заказ по СФ <b>${esc(p.fields.invoice_number||'')}</b> (${esc(p.fields.invoice_date||'')}, ${esc(p.fields.delivery_point||'')}) не найден в SalesDoctor за эту дату. <button class="btn btn-blue" id="dmVerifyBtn" style="padding:5px 11px;margin-left:6px">Повторить</button></span></div>`;
   const sd=p.sd, c=p.compare;
-  const ag=agentRef(sd)||'—'; const ex=(sd.expeditor&&(sd.expeditor.agentName||sd.expeditor.name||sd.expeditor.code_1C))||'—';
+  const ag=agentName(sd)||'—'; const ex=(sd.expeditor&&(sd.expeditor.agentName||sd.expeditor.name||sd.expeditor.code_1C))||'—';
   return `<div class="crm-card">
     <div class="crm-row"><span class="k">Заказ в CRM</span><span class="v tnum">${esc(sd.code_1C||sd.SD_id||'—')}</span></div>
     ${sd.invoiceNumber?`<div class="crm-row"><span class="k">Накладная CRM</span><span class="v tnum">${esc(sd.invoiceNumber)}</span></div>`:''}
@@ -1164,6 +1188,7 @@ function renderRegRows(){
       <td><div class="cell-cust">${esc(x.customer_name||'—')}</div></td>
       <td class="tnum">${esc(x.inn||'—')}</td>
       <td class="cell-pt">${esc(x.delivery_point||'—')}</td>
+      <td>${esc(x.crm_agent_name||x.crm_agent||'—')}</td>
       <td class="r tnum num-strong">${fmtNum(x.total_amount)}</td>
       <td>${corr}</td><td>${crm}</td><td>${stt}</td>
     </tr>`;
@@ -1263,7 +1288,7 @@ function regExportExcel(){
     'Исправления':x.manual_correction, 'Статус':x.recognition_status,
     'CRM найдено':x.crm_found===true?'Да':(x.crm_found===false?'Не найден':''),
     'Сумма CRM':x.crm_total===null?'':Number(x.crm_total), 'Разница':x.crm_diff===null?'':Number(x.crm_diff),
-    'Сверка':x.crm_match===true?'совпадает':(x.crm_match===false?'расхождение':''), 'Агент':x.crm_agent
+    'Сверка':x.crm_match===true?'совпадает':(x.crm_match===false?'расхождение':''), 'Агент':x.crm_agent_name||x.crm_agent
   }));
   const ws=XLSX.utils.json_to_sheet(rows); const wb=XLSX.utils.book_new(); XLSX.utils.book_append_sheet(wb,ws,'Реестр');
   const d=new Date(); XLSX.writeFile(wb,`Novagreen_реестр_${String(d.getDate()).padStart(2,'0')}-${String(d.getMonth()+1).padStart(2,'0')}-${d.getFullYear()}.xlsx`);
