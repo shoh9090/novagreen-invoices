@@ -458,9 +458,10 @@ input[type=range]{accent-color:var(--lime-d)}
     <div class="modal-body" style="display:block;padding:20px 22px;overflow:auto">
       <div class="ms" style="margin-bottom:12px">Агент пишет боту, делится номером — заявка появляется здесь. Подтвердите её и при желании впишите <b>код агента из CRM</b> (для адресных уведомлений на следующем шаге).</div>
       <div class="tbl-wrap"><table>
-        <thead><tr><th>Телефон</th><th>Имя в Telegram</th><th>Код агента (CRM)</th><th>Статус</th><th>Действия</th></tr></thead>
+        <thead><tr><th>Телефон</th><th>Имя в Telegram</th><th>Агент в CRM (имя/код)</th><th>Статус</th><th>Действия</th></tr></thead>
         <tbody id="botBody"></tbody>
       </table></div>
+      <datalist id="agentsSeen"></datalist>
     </div>
     <div class="modal-ft"><div class="grow"></div><button class="btn btn-ghost" id="botRefresh">Обновить</button><button class="btn btn-ghost" id="botCloseBtn">Закрыть</button></div>
   </div>
@@ -518,6 +519,7 @@ let CONFIG = { sd:false, telegram:false, sdIdType:'code_1C' };
 const $ = s => document.querySelector(s);
 const num = v => { if(typeof v==='number') return v; if(v==null||v==='') return ''; const d=String(v).replace(/[^\d.-]/g,''); return d===''?'':parseFloat(d); };
 const fmtNum = n => (n===''||n==null||isNaN(n)) ? '—' : Math.round(Number(n)).toLocaleString('ru-RU');
+const agentRef = sd => { const a=sd&&sd.agent; return a ? (a.agentName||a.name||a.fio||a.code_1C||a.SD_id||'') : ''; };
 const nowStr = () => new Date().toLocaleString('ru-RU',{day:'2-digit',month:'2-digit',year:'numeric',hour:'2-digit',minute:'2-digit'});
 const esc = s => String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 
@@ -601,7 +603,10 @@ $('#usersCloseBtn').onclick=()=>$('#usersOverlay').classList.remove('show');
 $('#nuPass').addEventListener('keydown',e=>{ if(e.key==='Enter') addUser(); });
 
 /* ===== Telegram-агенты (админ) ===== */
-async function openBot(){ $('#botOverlay').classList.add('show'); await loadBotAgents(); }
+async function openBot(){ $('#botOverlay').classList.add('show'); await loadBotAgents(); loadAgentsSeen(); }
+async function loadAgentsSeen(){
+  try{ const r=await fetch('/api/agents-seen'); const j=await r.json(); if(r.ok){ $('#agentsSeen').innerHTML=(j.rows||[]).map(v=>`<option value="${esc(v)}">`).join(''); } }catch(e){}
+}
 async function loadBotAgents(){
   const tb=$('#botBody'); tb.innerHTML='<tr><td colspan="5" style="color:#9fb0a4;padding:14px">Загрузка…</td></tr>';
   try{
@@ -615,7 +620,7 @@ async function loadBotAgents(){
       return `<tr>
         <td class="tnum">+${esc(a.phone||'—')}</td>
         <td>${esc(a.tg_name||'—')}</td>
-        <td><input class="bot-code" data-id="${a.id}" value="${esc(a.agent_code||'')}" placeholder="код" style="width:90px;font-size:12.5px;padding:6px 8px;border:1px solid var(--line);border-radius:7px"></td>
+        <td><input class="bot-code" list="agentsSeen" data-id="${a.id}" value="${esc(a.agent_code||'')}" placeholder="имя/код" style="width:120px;font-size:12.5px;padding:6px 8px;border:1px solid var(--line);border-radius:7px"></td>
         <td>${st}</td>
         <td><div class="u-actions">
           ${a.status!=='active'?`<button class="btn btn-dark btn-sm" data-act="active" data-id="${a.id}">Подтвердить</button>`:''}
@@ -827,7 +832,7 @@ async function saveInvoice(p){
       crm_found: p.sdStatus==='found'?true:(p.sdStatus==='notfound'?false:null),
       crm_sd_id: sd?(sd.code_1C||sd.SD_id):null, crm_invoice_number: sd?sd.invoiceNumber:null,
       crm_total: c?c.crmTotal:null, crm_diff: c?c.diff:null, crm_match: c?c.match:null,
-      crm_agent: sd&&sd.agent?sd.agent.code_1C:null,
+      crm_agent: agentRef(sd)||null,
       file_name:p.file_name, page_number:p.page_number,
       image_base64: sendImage?p.b64:null, image_media_type: sendImage?p.mediaType:null,
       operator:operator, uploaded_at:p.uploaded_at
@@ -854,20 +859,22 @@ function buildTgText(p){
 }
 async function notifyOne(p){
   if(!CONFIG.telegram){ showToast('Telegram не подключён. Настройте на сервере.',true); return false; }
+  if(!p.fields.invoice_number || p.fields.invoice_number==='Не распознано'){ showToast('Нет номера СФ для отправки',true); return false; }
   try{
-    const r=await fetch('/api/telegram/send',{method:'POST',headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({text:buildTgText(p), managerCode:(p.sd&&p.sd.agent&&p.sd.agent.code_1C)||''})});
+    const r=await fetch('/api/telegram/notify',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({invoice_number:p.fields.invoice_number})});
     const j=await r.json();
-    if(r.ok && j.ok){ p.notified=true; return true; }
+    if(r.ok){ p.notified=true; p.notifiedTo=j.sentTo; return j.sentTo||true; }
     showToast('Telegram: '+(j.error||'ошибка'),true); return false;
   }catch(e){ showToast('Telegram: '+e.message,true); return false; }
 }
 async function notifyAll(){
   const rows=pages.filter(p=>p.compare && !p.compare.match && !p.notified);
   if(!rows.length){ showToast('Нет новых расхождений для отправки'); return; }
-  let sent=0; for(const p of rows){ if(await notifyOne(p)) sent++; }
+  let agent=0,def=0,err=0;
+  for(const p of rows){ const res=await notifyOne(p); if(res==='agent') agent++; else if(res) def++; else err++; }
   renderTable(); updateButtons();
-  showToast(sent? ('Отправлено в Telegram: '+sent):'Не отправлено');
+  showToast(`Отправлено — лично агентам: ${agent}, в общий чат: ${def}`+(err?`, ошибок: ${err}`:''));
 }
 
 /* ===== Progress ===== */
@@ -1026,7 +1033,7 @@ function renderCrm(p){
   if(p.sdStatus==='error') return `<div class="note-warn"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M12 8v4M12 16h.01"/></svg><span>Ошибка сверки: ${esc(p.sdError||'неизвестно')}. <button class="btn btn-blue" id="dmVerifyBtn" style="padding:5px 11px;margin-left:6px">Повторить</button></span></div>`;
   if(p.sdStatus==='notfound') return `<div class="note-warn"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M12 8v4M12 16h.01"/></svg><span>Заказ по СФ <b>${esc(p.fields.invoice_number||'')}</b> (${esc(p.fields.invoice_date||'')}, ${esc(p.fields.delivery_point||'')}) не найден в SalesDoctor за эту дату. <button class="btn btn-blue" id="dmVerifyBtn" style="padding:5px 11px;margin-left:6px">Повторить</button></span></div>`;
   const sd=p.sd, c=p.compare;
-  const ag=(sd.agent&&sd.agent.code_1C)||'—'; const ex=(sd.expeditor&&sd.expeditor.code_1C)||'—';
+  const ag=agentRef(sd)||'—'; const ex=(sd.expeditor&&(sd.expeditor.agentName||sd.expeditor.name||sd.expeditor.code_1C))||'—';
   return `<div class="crm-card">
     <div class="crm-row"><span class="k">Заказ в CRM</span><span class="v tnum">${esc(sd.code_1C||sd.SD_id||'—')}</span></div>
     ${sd.invoiceNumber?`<div class="crm-row"><span class="k">Накладная CRM</span><span class="v tnum">${esc(sd.invoiceNumber)}</span></div>`:''}
