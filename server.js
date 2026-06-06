@@ -95,6 +95,16 @@ async function initDb() {
     CREATE INDEX IF NOT EXISTS idx_inv_cust ON invoices(customer_name);
   `);
   await pool.query(`ALTER TABLE invoices ADD COLUMN IF NOT EXISTS image_key TEXT;`);
+  await pool.query(`CREATE TABLE IF NOT EXISTS bot_agents (
+    id BIGSERIAL PRIMARY KEY,
+    chat_id TEXT UNIQUE,
+    phone TEXT,
+    tg_name TEXT,
+    agent_code TEXT,
+    agent_name TEXT,
+    status TEXT DEFAULT 'pending',
+    created_at TIMESTAMPTZ DEFAULT NOW()
+  );`);
   console.log('✅ База данных готова (таблица invoices)');
 }
 initDb().catch(e => console.error('Ошибка инициализации базы:', e.message));
@@ -428,6 +438,117 @@ app.post('/api/telegram/send', async (req, res) => {
   } catch (err) {
     res.status(502).json({ error: err.message });
   }
+});
+
+/* ============================================================
+   3b. Двусторонний Telegram-бот: регистрация агентов + выдача сканов
+   ============================================================ */
+const TG_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
+async function tgApi(method, body) {
+  return fetch(`https://api.telegram.org/bot${TG_TOKEN}/${method}`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body)
+  }).then(r => r.json()).catch(e => ({ ok: false, description: e.message }));
+}
+async function tgSend(chatId, text, extra) {
+  if (!TG_TOKEN) return;
+  return tgApi('sendMessage', Object.assign({ chat_id: chatId, text, parse_mode: 'HTML', disable_web_page_preview: true }, extra || {}));
+}
+async function tgSendDoc(chatId, buffer, mtype, caption, filename) {
+  if (!TG_TOKEN) return;
+  const form = new FormData();
+  form.append('chat_id', String(chatId));
+  if (caption) form.append('caption', caption);
+  form.append('document', new Blob([buffer], { type: mtype || 'image/jpeg' }), filename || 'invoice.jpg');
+  return fetch(`https://api.telegram.org/bot${TG_TOKEN}/sendDocument`, { method: 'POST', body: form }).then(r => r.json()).catch(e => ({ ok: false, description: e.message }));
+}
+
+// автоустановка webhook при старте
+async function setupWebhook() {
+  if (!TG_TOKEN) return;
+  const domain = process.env.APP_URL || (process.env.RAILWAY_PUBLIC_DOMAIN ? 'https://' + process.env.RAILWAY_PUBLIC_DOMAIN : '');
+  if (!domain) { console.log('ℹ️ APP_URL не задан — webhook бота не установлен'); return; }
+  const url = domain.replace(/\/+$/, '') + '/telegram/webhook';
+  const j = await tgApi('setWebhook', { url, allowed_updates: ['message'] });
+  console.log('Telegram webhook:', j.ok ? ('OK → ' + url) : j.description);
+}
+setTimeout(setupWebhook, 3500);
+
+const KB_PHONE = { keyboard: [[{ text: '📱 Отправить мой номер', request_contact: true }]], resize_keyboard: true, one_time_keyboard: true };
+
+// helper: достать картинку накладной в виде буфера
+async function invoiceImageBuffer(row) {
+  let dataUrl = null;
+  if (row.image_key && r2) { try { dataUrl = await r2GetDataUrl(row.image_key, row.image_media_type); } catch (e) {} }
+  if (!dataUrl && row.image_base64) dataUrl = 'data:' + (row.image_media_type || 'image/jpeg') + ';base64,' + row.image_base64;
+  if (!dataUrl) return null;
+  const m = dataUrl.match(/^data:(.*?);base64,(.*)$/); if (!m) return null;
+  return { buffer: Buffer.from(m[2], 'base64'), mtype: m[1] };
+}
+
+app.post('/telegram/webhook', async (req, res) => {
+  res.json({ ok: true }); // отвечаем Telegram сразу
+  try {
+    const msg = req.body && req.body.message; if (!msg) return;
+    const chatId = msg.chat && msg.chat.id; if (!chatId) return;
+    if (!pool) { await tgSend(chatId, 'База данных не подключена.'); return; }
+
+    // /start
+    if (msg.text && msg.text.trim().toLowerCase().startsWith('/start')) {
+      await tgSend(chatId, '<b>Novagreen — бот для торговой команды</b>\n\nЧтобы получить доступ, отправьте свой номер телефона кнопкой ниже. После подтверждения администратором вы сможете запрашивать сканы счёт-фактур: просто пришлите номер СФ, и бот вернёт скан.', { reply_markup: KB_PHONE });
+      return;
+    }
+    // получен контакт (телефон)
+    if (msg.contact && msg.contact.phone_number) {
+      const phone = String(msg.contact.phone_number).replace(/\D/g, '');
+      const name = [msg.from && msg.from.first_name, msg.from && msg.from.last_name].filter(Boolean).join(' ');
+      await pool.query(`INSERT INTO bot_agents (chat_id, phone, tg_name, status) VALUES ($1,$2,$3,'pending')
+        ON CONFLICT (chat_id) DO UPDATE SET phone=$2, tg_name=$3`, [String(chatId), phone, name]);
+      await tgSend(chatId, '✅ Номер получен: +' + phone + '\nЗаявка отправлена администратору. Как только вас подтвердят — пришлите номер счёт-фактуры.', { reply_markup: { remove_keyboard: true } });
+      return;
+    }
+    // текст — запрос накладной
+    if (msg.text) {
+      const reg = await pool.query('SELECT * FROM bot_agents WHERE chat_id=$1', [String(chatId)]);
+      const a = reg.rows[0];
+      if (!a) { await tgSend(chatId, 'Сначала отправьте /start и поделитесь номером телефона.'); return; }
+      if (a.status === 'blocked') { await tgSend(chatId, 'Ваш доступ заблокирован. Обратитесь к администратору.'); return; }
+      if (a.status !== 'active') { await tgSend(chatId, '⏳ Доступ ещё не подтверждён администратором. Пожалуйста, подождите.'); return; }
+      const q = msg.text.trim().replace(/[^\dA-Za-z]/g, '');
+      if (!q) { await tgSend(chatId, 'Отправьте номер счёт-фактуры цифрами, например <b>49586</b>.'); return; }
+      const inv = await pool.query(`SELECT id, invoice_number, customer_name, delivery_point, invoice_date, total_amount, image_base64, image_media_type, image_key
+        FROM invoices WHERE invoice_number=$1 ORDER BY saved_at DESC LIMIT 1`, [q]);
+      if (!inv.rows.length) { await tgSend(chatId, '❌ Счёт-фактура № ' + q + ' не найдена в базе.'); return; }
+      const row = inv.rows[0];
+      const caption = `СФ № ${row.invoice_number}\n${row.customer_name || ''}\n${row.delivery_point || ''}\n${row.invoice_date || ''}${row.total_amount ? ' · ' + Number(row.total_amount).toLocaleString('ru-RU') + ' сум' : ''}`;
+      const img = await invoiceImageBuffer(row);
+      if (!img) { await tgSend(chatId, caption + '\n\n(скан недоступен)'); return; }
+      const ext = (img.mtype || '').includes('png') ? 'png' : 'jpg';
+      const fname = ('SF_' + row.invoice_number + '_' + (row.delivery_point || '')).replace(/[^a-zA-Z0-9_\-]+/g, '_').slice(0, 50) + '.' + ext;
+      await tgSendDoc(chatId, img.buffer, img.mtype, caption, fname);
+      return;
+    }
+  } catch (e) { console.error('webhook error:', e.message); }
+});
+
+// Админ: список и управление агентами бота
+app.get('/api/bot-agents', adminOnly, async (req, res) => {
+  if (!pool) return res.status(400).json({ error: 'Нет базы' });
+  const r = await pool.query('SELECT id,chat_id,phone,tg_name,agent_code,agent_name,status,created_at FROM bot_agents ORDER BY created_at DESC');
+  res.json({ rows: r.rows });
+});
+app.post('/api/bot-agents/:id', adminOnly, async (req, res) => {
+  if (!pool) return res.status(400).json({ error: 'Нет базы' });
+  const { status, agent_code, agent_name } = req.body || {};
+  try {
+    if (status) await pool.query('UPDATE bot_agents SET status=$1 WHERE id=$2', [status, req.params.id]);
+    if (agent_code !== undefined) await pool.query('UPDATE bot_agents SET agent_code=$1 WHERE id=$2', [agent_code || null, req.params.id]);
+    if (agent_name !== undefined) await pool.query('UPDATE bot_agents SET agent_name=$1 WHERE id=$2', [agent_name || null, req.params.id]);
+    if (status === 'active') {
+      const r = await pool.query('SELECT chat_id FROM bot_agents WHERE id=$1', [req.params.id]);
+      if (r.rows[0]) await tgSend(r.rows[0].chat_id, '✅ Доступ подтверждён! Пришлите номер счёт-фактуры — и я верну скан.', { reply_markup: { remove_keyboard: true } });
+    }
+    res.json({ ok: true });
+  } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
 /* ============================================================
