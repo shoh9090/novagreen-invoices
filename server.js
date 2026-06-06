@@ -468,8 +468,9 @@ async function sdFetchAgents() {
     name: a.agentName || a.name || a.fio || a.fullName || '',
     login: a.login || a.username || '',
     phone: normPhone(a.phone || a.phoneNumber || a.telephone || a.tel || a.mobile || ''),
-    code: a.code_1C || a.code || ''
-  })).filter(a => a.sd_id);
+    code: a.code_1C || a.code || '',
+    _active: !(a.active === false || a.isActive === false || a.deleted === true || a.isDeleted === true || /^deleted_user/i.test(String(a.login || a.username || '')) || String(a.status || '').toLowerCase() === 'inactive')
+  })).filter(a => a.sd_id && a._active).map(a => { delete a._active; return a; });
 }
 async function tgApi(method, body) {
   return fetch(`https://api.telegram.org/bot${TG_TOKEN}/${method}`, {
@@ -580,11 +581,14 @@ app.post('/api/crm-agents/sync', adminOnly, async (req, res) => {
   if (!pool) return res.status(400).json({ error: 'Нет базы' });
   try {
     const list = await sdFetchAgents();
+    const ids = list.map(a => a.sd_id);
     for (const a of list) {
       await pool.query(`INSERT INTO crm_agents (sd_id,name,login,phone,code,updated_at) VALUES ($1,$2,$3,$4,$5,NOW())
         ON CONFLICT (sd_id) DO UPDATE SET name=$2, login=$3, phone=$4, code=$5, updated_at=NOW()`,
         [a.sd_id, a.name, a.login, a.phone, a.code]);
     }
+    // убрать тех, кого больше нет среди активных
+    if (ids.length) await pool.query('DELETE FROM crm_agents WHERE NOT (sd_id = ANY($1::text[]))', [ids]);
     res.json({ ok: true, count: list.length, sample: list.slice(0, 5) });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
