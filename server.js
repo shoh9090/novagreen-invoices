@@ -592,7 +592,7 @@ app.post('/api/crm-agents/sync', adminOnly, async (req, res) => {
     res.json({ ok: true, count: list.length, sample: list.slice(0, 5) });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
-app.get('/api/crm-agents', adminOnly, async (req, res) => {
+app.get('/api/crm-agents', async (req, res) => {
   if (!pool) return res.status(400).json({ error: 'Нет базы' });
   const r = await pool.query('SELECT sd_id,name,login,phone,code FROM crm_agents ORDER BY name');
   res.json({ rows: r.rows });
@@ -716,9 +716,11 @@ app.get('/api/invoices', async (req, res) => {
     if (status === 'corr') where.push(`manual_correction = 'Да'`);
     if (status === 'ok') where.push(`recognition_status = 'OK'`);
     if (status === 'review') where.push(`recognition_status <> 'OK'`);
-    const sql = `SELECT id, invoice_number, invoice_date, customer_name, inn, delivery_point, order_number,
-      total_amount, vat_amount, manual_correction, recognition_status, crm_found, crm_total, crm_diff, crm_match, crm_agent, crm_agent_name, file_name, page_number, saved_at
-      FROM invoices ${where.length ? 'WHERE ' + where.join(' AND ') : ''}
+    const sql = `SELECT invoices.id, invoice_number, invoice_date, customer_name, inn, delivery_point, order_number,
+      total_amount, vat_amount, manual_correction, recognition_status, crm_found, crm_total, crm_diff, crm_match, crm_agent, crm_agent_name,
+      ca.login AS agent_login, file_name, page_number, saved_at
+      FROM invoices LEFT JOIN crm_agents ca ON ca.sd_id = invoices.crm_agent
+      ${where.length ? 'WHERE ' + where.join(' AND ') : ''}
       ORDER BY invoice_date_iso DESC NULLS LAST, saved_at DESC LIMIT 500`;
     const r = await pool.query(sql, p);
     res.json({ count: r.rows.length, rows: r.rows });
