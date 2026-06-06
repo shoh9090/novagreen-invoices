@@ -619,7 +619,8 @@ async function syncAgents(){
   b.disabled=false; b.textContent=t;
 }
 function agentSelect(id, current){
-  const opts=['<option value="">— не привязан —</option>'].concat(crmAgents.map(a=>{
+  const active=crmAgents.filter(a=>!/^deleted_user/i.test(String(a.login||'')));
+  const opts=['<option value="">— не привязан —</option>'].concat(active.map(a=>{
     const label=esc((a.login?a.login+' — ':'')+(a.name||a.sd_id));
     return `<option value="${esc(a.sd_id)}" ${a.sd_id===current?'selected':''}>${label}</option>`;
   })).join('');
@@ -681,7 +682,13 @@ fetch('/api/config').then(r=>r.json()).then(async c=>{
   }
   initAfterAuth();
 }).catch(()=>{ initAfterAuth(); });
-function initAfterAuth(){ settings.autoVerify = CONFIG.sd; applyConfigUI(); updateButtons(); if(tok()) setUser(JSON.parse(localStorage.getItem('ng_user')||'{}')); }
+function initAfterAuth(){ settings.autoVerify = CONFIG.sd; applyConfigUI(); updateButtons(); if(tok()) setUser(JSON.parse(localStorage.getItem('ng_user')||'{}')); loadAgentMap(); }
+let agentLoginById={};
+async function loadAgentMap(){
+  try{ const r=await fetch('/api/crm-agents'); const j=await r.json();
+    if(r.ok){ agentLoginById={}; (j.rows||[]).forEach(a=>{ if(a.sd_id) agentLoginById[a.sd_id]=a.login||a.name||a.sd_id; }); if(typeof renderTable==='function') renderTable(); }
+  }catch(e){}
+}
 function applyConfigUI(){
   $('#chipCrm').classList.toggle('on', CONFIG.sd);
   $('#chipCrm').lastChild.textContent = CONFIG.sd ? 'CRM подключена' : 'CRM выкл.';
@@ -968,7 +975,7 @@ function renderTable(){
       <td class="r tnum">${p.status==='done'?fmtNum(f.vat_amount):'—'}</td>
       <td>${corrBadge(p)}</td>
       <td>${crmBadge(p)}</td>
-      <td>${p.sd?`<span class="cell-pt">${esc(agentName(p.sd)||'—')}</span>`:'<span style="color:var(--ink-faint)">—</span>'}</td>
+      <td>${(()=>{ const id=agentId(p.sd); const lg=id&&agentLoginById[id]; return (lg||agentName(p.sd))?`<span class="cell-pt">${esc(lg||agentName(p.sd))}</span>`:'<span style="color:var(--ink-faint)">—</span>'; })()}</td>
       <td>${statusBadge(p)}</td>
       <td style="text-align:center">${(p.compare && !p.compare.match)?sentIcon(p):''}</td>
     </tr>`;
@@ -1197,7 +1204,7 @@ function renderRegRows(){
       <td><div class="cell-cust">${esc(x.customer_name||'—')}</div></td>
       <td class="tnum">${esc(x.inn||'—')}</td>
       <td class="cell-pt">${esc(x.delivery_point||'—')}</td>
-      <td>${esc(x.crm_agent_name||x.crm_agent||'—')}</td>
+      <td>${esc(x.agent_login||x.crm_agent_name||x.crm_agent||'—')}</td>
       <td class="r tnum num-strong">${fmtNum(x.total_amount)}</td>
       <td>${corr}</td><td>${crm}</td><td>${stt}</td>
     </tr>`;
