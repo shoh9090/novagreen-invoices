@@ -95,6 +95,15 @@ async function initDb() {
     CREATE INDEX IF NOT EXISTS idx_inv_cust ON invoices(customer_name);
   `);
   await pool.query(`ALTER TABLE invoices ADD COLUMN IF NOT EXISTS image_key TEXT;`);
+  await pool.query(`ALTER TABLE invoices ADD COLUMN IF NOT EXISTS crm_agent_name TEXT;`);
+  await pool.query(`CREATE TABLE IF NOT EXISTS crm_agents (
+    sd_id TEXT PRIMARY KEY,
+    name TEXT,
+    login TEXT,
+    phone TEXT,
+    code TEXT,
+    updated_at TIMESTAMPTZ DEFAULT NOW()
+  );`);
   await pool.query(`CREATE TABLE IF NOT EXISTS bot_agents (
     id BIGSERIAL PRIMARY KEY,
     chat_id TEXT UNIQUE,
@@ -444,6 +453,24 @@ app.post('/api/telegram/send', async (req, res) => {
    3b. Двусторонний Telegram-бот: регистрация агентов + выдача сканов
    ============================================================ */
 const TG_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
+function normPhone(p) { return (p == null ? '' : String(p)).replace(/\D/g, '').replace(/^0+/, ''); }
+async function sdFetchAgents() {
+  const domain = process.env.SD_DOMAIN;
+  const auth = await sdLogin(false);
+  const r = await fetch(`https://${domain}/api/v2`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ method: 'getAgent', auth: { userId: auth.userId, token: auth.token }, params: { limit: 1000 } })
+  });
+  const j = await r.json();
+  const list = (j.result && (j.result.agent || j.result.agents)) || [];
+  return list.map(a => ({
+    sd_id: a.SD_id || a.sd_id || a.id || a.code_1C || '',
+    name: a.agentName || a.name || a.fio || a.fullName || '',
+    login: a.login || a.username || '',
+    phone: normPhone(a.phone || a.phoneNumber || a.telephone || a.tel || a.mobile || ''),
+    code: a.code_1C || a.code || ''
+  })).filter(a => a.sd_id);
+}
 async function tgApi(method, body) {
   return fetch(`https://api.telegram.org/bot${TG_TOKEN}/${method}`, {
     method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body)
@@ -499,11 +526,19 @@ app.post('/telegram/webhook', async (req, res) => {
     }
     // получен контакт (телефон)
     if (msg.contact && msg.contact.phone_number) {
-      const phone = String(msg.contact.phone_number).replace(/\D/g, '');
+      const phone = normPhone(msg.contact.phone_number);
       const name = [msg.from && msg.from.first_name, msg.from && msg.from.last_name].filter(Boolean).join(' ');
       await pool.query(`INSERT INTO bot_agents (chat_id, phone, tg_name, status) VALUES ($1,$2,$3,'pending')
         ON CONFLICT (chat_id) DO UPDATE SET phone=$2, tg_name=$3`, [String(chatId), phone, name]);
-      await tgSend(chatId, '✅ Номер получен: +' + phone + '\nЗаявка отправлена администратору. Как только вас подтвердят — пришлите номер счёт-фактуры.', { reply_markup: { remove_keyboard: true } });
+      let linkMsg = '';
+      try {
+        const ca = await pool.query('SELECT sd_id,name FROM crm_agents WHERE phone=$1 LIMIT 1', [phone]);
+        if (ca.rows.length) {
+          await pool.query('UPDATE bot_agents SET agent_code=$1, agent_name=$2 WHERE chat_id=$3', [ca.rows[0].sd_id, ca.rows[0].name, String(chatId)]);
+          linkMsg = '\nВ CRM вы определены как: <b>' + ca.rows[0].name + '</b>';
+        }
+      } catch (e) {}
+      await tgSend(chatId, '✅ Номер получен: +' + phone + linkMsg + '\nЗаявка отправлена администратору. Как только вас подтвердят — присылайте номер счёт-фактуры.', { reply_markup: { remove_keyboard: true } });
       return;
     }
     // текст — запрос накладной
@@ -540,6 +575,23 @@ app.get('/api/agents-seen', adminOnly, async (req, res) => {
   if (!pool) return res.status(400).json({ error: 'Нет базы' });
   try { const r = await pool.query("SELECT DISTINCT crm_agent FROM invoices WHERE crm_agent IS NOT NULL AND crm_agent<>'' ORDER BY 1"); res.json({ rows: r.rows.map(x => x.crm_agent) }); }
   catch (e) { res.status(500).json({ error: e.message }); }
+});
+app.post('/api/crm-agents/sync', adminOnly, async (req, res) => {
+  if (!pool) return res.status(400).json({ error: 'Нет базы' });
+  try {
+    const list = await sdFetchAgents();
+    for (const a of list) {
+      await pool.query(`INSERT INTO crm_agents (sd_id,name,login,phone,code,updated_at) VALUES ($1,$2,$3,$4,$5,NOW())
+        ON CONFLICT (sd_id) DO UPDATE SET name=$2, login=$3, phone=$4, code=$5, updated_at=NOW()`,
+        [a.sd_id, a.name, a.login, a.phone, a.code]);
+    }
+    res.json({ ok: true, count: list.length, sample: list.slice(0, 5) });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+app.get('/api/crm-agents', adminOnly, async (req, res) => {
+  if (!pool) return res.status(400).json({ error: 'Нет базы' });
+  const r = await pool.query('SELECT sd_id,name,login,phone,code FROM crm_agents ORDER BY name');
+  res.json({ rows: r.rows });
 });
 app.post('/api/bot-agents/:id', adminOnly, async (req, res) => {
   if (!pool) return res.status(400).json({ error: 'Нет базы' });
@@ -580,8 +632,14 @@ app.post('/api/telegram/notify', async (req, res) => {
     const text = lines.join('\n');
 
     let chatId = null, sentTo = 'default';
-    if (v.crm_agent) {
-      const a = await pool.query("SELECT chat_id FROM bot_agents WHERE status='active' AND lower(trim(agent_code))=lower(trim($1)) LIMIT 1", [String(v.crm_agent)]);
+    if (v.crm_agent || v.crm_agent_name) {
+      const a = await pool.query(
+        `SELECT chat_id FROM bot_agents WHERE status='active' AND (
+            agent_code=$1
+            OR lower(trim(agent_name))=lower(trim($2))
+            OR lower(trim(agent_name))=lower(trim($1))
+         ) LIMIT 1`,
+        [String(v.crm_agent || ''), String(v.crm_agent_name || '')]);
       if (a.rows.length) { chatId = a.rows[0].chat_id; sentTo = 'agent'; }
     }
     if (!chatId) chatId = process.env.TELEGRAM_DEFAULT_CHAT_ID;
@@ -618,20 +676,20 @@ app.post('/api/invoices', async (req, res) => {
         (doc_key, invoice_number, invoice_date, invoice_date_iso, customer_name, inn, delivery_point, order_number,
          total_amount, vat_amount, manual_correction, correction_comment, recognition_status, confidence_score,
          crm_found, crm_sd_id, crm_invoice_number, crm_total, crm_diff, crm_match, crm_agent,
-         file_name, page_number, image_base64, image_media_type, operator, uploaded_at, image_key, saved_at)
-      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28, NOW())
+         file_name, page_number, image_base64, image_media_type, operator, uploaded_at, image_key, crm_agent_name, saved_at)
+      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29, NOW())
       ON CONFLICT (doc_key) DO UPDATE SET
         invoice_number=$2, invoice_date=$3, invoice_date_iso=$4, customer_name=$5, inn=$6, delivery_point=$7, order_number=$8,
         total_amount=$9, vat_amount=$10, manual_correction=$11, correction_comment=$12, recognition_status=$13, confidence_score=$14,
         crm_found=$15, crm_sd_id=$16, crm_invoice_number=$17, crm_total=$18, crm_diff=$19, crm_match=$20, crm_agent=$21,
         file_name=$22, page_number=$23, image_base64=COALESCE($24, invoices.image_base64), image_media_type=$25, operator=$26, uploaded_at=$27,
-        image_key=COALESCE($28, invoices.image_key), saved_at=NOW()
+        image_key=COALESCE($28, invoices.image_key), crm_agent_name=$29, saved_at=NOW()
     `, [
       b.doc_key, b.invoice_number || null, b.invoice_date || null, dateToIso(b.invoice_date), b.customer_name || null, b.inn || null,
       b.delivery_point || null, b.order_number || null,
       num(b.total_amount), num(b.vat_amount), b.manual_correction || null, b.correction_comment || null, b.recognition_status || null, num(b.confidence_score),
       b.crm_found ?? null, b.crm_sd_id || null, b.crm_invoice_number || null, num(b.crm_total), num(b.crm_diff), b.crm_match ?? null, b.crm_agent || null,
-      b.file_name || null, b.page_number || null, base64ToStore, b.image_media_type || null, b.operator || null, b.uploaded_at || null, imageKey
+      b.file_name || null, b.page_number || null, base64ToStore, b.image_media_type || null, b.operator || null, b.uploaded_at || null, imageKey, b.crm_agent_name || null
     ]);
     res.json({ ok: true });
   } catch (err) { res.status(500).json({ error: err.message }); }
@@ -655,7 +713,7 @@ app.get('/api/invoices', async (req, res) => {
     if (status === 'ok') where.push(`recognition_status = 'OK'`);
     if (status === 'review') where.push(`recognition_status <> 'OK'`);
     const sql = `SELECT id, invoice_number, invoice_date, customer_name, inn, delivery_point, order_number,
-      total_amount, vat_amount, manual_correction, recognition_status, crm_found, crm_total, crm_diff, crm_match, crm_agent, file_name, page_number, saved_at
+      total_amount, vat_amount, manual_correction, recognition_status, crm_found, crm_total, crm_diff, crm_match, crm_agent, crm_agent_name, file_name, page_number, saved_at
       FROM invoices ${where.length ? 'WHERE ' + where.join(' AND ') : ''}
       ORDER BY invoice_date_iso DESC NULLS LAST, saved_at DESC LIMIT 500`;
     const r = await pool.query(sql, p);
