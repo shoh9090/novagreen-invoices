@@ -536,6 +536,11 @@ app.get('/api/bot-agents', adminOnly, async (req, res) => {
   const r = await pool.query('SELECT id,chat_id,phone,tg_name,agent_code,agent_name,status,created_at FROM bot_agents ORDER BY created_at DESC');
   res.json({ rows: r.rows });
 });
+app.get('/api/agents-seen', adminOnly, async (req, res) => {
+  if (!pool) return res.status(400).json({ error: 'Нет базы' });
+  try { const r = await pool.query("SELECT DISTINCT crm_agent FROM invoices WHERE crm_agent IS NOT NULL AND crm_agent<>'' ORDER BY 1"); res.json({ rows: r.rows.map(x => x.crm_agent) }); }
+  catch (e) { res.status(500).json({ error: e.message }); }
+});
 app.post('/api/bot-agents/:id', adminOnly, async (req, res) => {
   if (!pool) return res.status(400).json({ error: 'Нет базы' });
   const { status, agent_code, agent_name } = req.body || {};
@@ -548,6 +553,44 @@ app.post('/api/bot-agents/:id', adminOnly, async (req, res) => {
       if (r.rows[0]) await tgSend(r.rows[0].chat_id, '✅ Доступ подтверждён! Пришлите номер счёт-фактуры — и я верну скан.', { reply_markup: { remove_keyboard: true } });
     }
     res.json({ ok: true });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// Адресное уведомление о расхождении: лично агенту (по привязке) либо в общий чат
+app.post('/api/telegram/notify', async (req, res) => {
+  if (!TG_TOKEN) return res.status(400).json({ error: 'Telegram не настроен' });
+  if (!pool) return res.status(400).json({ error: 'Нет базы' });
+  const invNum = (req.body && req.body.invoice_number || '').toString().trim();
+  if (!invNum) return res.status(400).json({ error: 'Нет номера СФ' });
+  try {
+    const r = await pool.query('SELECT * FROM invoices WHERE invoice_number=$1 ORDER BY saved_at DESC LIMIT 1', [invNum]);
+    if (!r.rows.length) return res.status(404).json({ error: 'Накладная не найдена в базе' });
+    const v = r.rows[0];
+    const diff = Number(v.crm_diff) || 0;
+    const lines = [
+      '⚠️ <b>Расхождение по счёт-фактуре</b>',
+      'СФ № ' + (v.invoice_number || '—'),
+      (v.customer_name || '') + (v.delivery_point ? (' · ' + v.delivery_point) : ''),
+      'Дата: ' + (v.invoice_date || '—'),
+      'Скан: ' + (v.total_amount != null ? Number(v.total_amount).toLocaleString('ru-RU') : '—') + ' сум',
+      'CRM: ' + (v.crm_total != null ? Number(v.crm_total).toLocaleString('ru-RU') : '—') + ' сум',
+      'Разница: ' + (diff > 0 ? '+' : '') + diff.toLocaleString('ru-RU') + ' сум'
+    ];
+    if (v.manual_correction === 'Да') lines.push('✏️ На скане есть ручные исправления');
+    const text = lines.join('\n');
+
+    let chatId = null, sentTo = 'default';
+    if (v.crm_agent) {
+      const a = await pool.query("SELECT chat_id FROM bot_agents WHERE status='active' AND lower(trim(agent_code))=lower(trim($1)) LIMIT 1", [String(v.crm_agent)]);
+      if (a.rows.length) { chatId = a.rows[0].chat_id; sentTo = 'agent'; }
+    }
+    if (!chatId) chatId = process.env.TELEGRAM_DEFAULT_CHAT_ID;
+    if (!chatId) return res.status(400).json({ error: 'Нет получателя: агент не привязан и не задан TELEGRAM_DEFAULT_CHAT_ID' });
+
+    const img = await invoiceImageBuffer(v);
+    if (img) { const ext = (img.mtype || '').includes('png') ? 'png' : 'jpg'; await tgSendDoc(chatId, img.buffer, img.mtype, text, 'SF_' + v.invoice_number + '.' + ext); }
+    else await tgSend(chatId, text);
+    res.json({ ok: true, sentTo });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
