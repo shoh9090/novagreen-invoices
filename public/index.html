@@ -330,7 +330,7 @@ input[type=range]{accent-color:var(--lime-d)}
         <thead><tr>
           <th>Стр.</th><th>Заказ / Номер СФ</th><th>Дата</th><th>Заказчик / точка</th>
           <th class="r">Сумма с НДС</th><th class="r">НДС</th>
-          <th>Исправления</th><th>Сверка CRM</th><th>Статус</th>
+          <th>Исправления</th><th>Сверка CRM</th><th>Агент</th><th>Статус</th><th style="text-align:center" title="Уведомление агенту">✈</th>
         </tr></thead>
         <tbody id="tbody"></tbody>
       </table>
@@ -620,7 +620,7 @@ async function syncAgents(){
 }
 function agentSelect(id, current){
   const opts=['<option value="">— не привязан —</option>'].concat(crmAgents.map(a=>{
-    const label=esc((a.name||a.sd_id)+(a.phone?(' (+'+a.phone+')'):''));
+    const label=esc((a.login?a.login+' — ':'')+(a.name||a.sd_id));
     return `<option value="${esc(a.sd_id)}" ${a.sd_id===current?'selected':''}>${label}</option>`;
   })).join('');
   return `<select class="bot-code" data-id="${id}" style="font-size:12.5px;padding:6px 8px;border:1px solid var(--line);border-radius:7px;max-width:200px">${opts}</select>`;
@@ -921,6 +921,13 @@ function corrBadge(p){
   if(v==='Требуется проверка') return `<span class="badge b-warn"><span class="bd"></span>Проверка</span>`;
   return `<span class="badge b-no"><span class="bd"></span>Нет</span>`;
 }
+function sentIcon(p){
+  const on=!!p.notified;
+  const title = on ? ('Уведомление отправлено'+(p.notifiedTo==='agent'?' лично агенту':(p.notifiedTo==='default'?' в общий чат':''))) : 'Не отправлено';
+  const color = on ? (p.notifiedTo==='agent'?'#2f6fb0':'#8a9a8f') : 'none';
+  const stroke = on ? (p.notifiedTo==='agent'?'#2f6fb0':'#8a9a8f') : '#c2cabf';
+  return '<span title="'+title+'" style="display:inline-flex;cursor:default"><svg viewBox="0 0 24 24" width="17" height="17" fill="'+color+'" stroke="'+stroke+'" stroke-width="2"><path d="M22 2 11 13M22 2l-7 20-4-9-9-4 20-7z"/></svg></span>';
+}
 function crmBadge(p){
   if(p.sdStatus==='loading') return `<span class="badge b-proc"><span class="bd"></span>Сверка…</span>`;
   if(p.sdStatus==='error') return `<span class="badge b-err"><span class="bd"></span>Ошибка</span>`;
@@ -961,7 +968,9 @@ function renderTable(){
       <td class="r tnum">${p.status==='done'?fmtNum(f.vat_amount):'—'}</td>
       <td>${corrBadge(p)}</td>
       <td>${crmBadge(p)}</td>
+      <td>${p.sd?`<span class="cell-pt">${esc(agentName(p.sd)||'—')}</span>`:'<span style="color:var(--ink-faint)">—</span>'}</td>
       <td>${statusBadge(p)}</td>
+      <td style="text-align:center">${(p.compare && !p.compare.match)?sentIcon(p):''}</td>
     </tr>`;
   }).join('');
   tbody.querySelectorAll('tr').forEach(tr=>tr.onclick=()=>openDetail(tr.dataset.id));
