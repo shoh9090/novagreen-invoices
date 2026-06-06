@@ -9,6 +9,7 @@
 <link href="https://fonts.googleapis.com/css2?family=Lora:ital,wght@0,400;0,500;0,600;0,700;1,400;1,500&family=Manrope:wght@400;500;600;700;800&display=swap" rel="stylesheet">
 <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
 <style>
 :root{
   --ink:#14241b; --ink-soft:#52605a; --ink-faint:#8a958f;
@@ -62,6 +63,11 @@ header.app{background:var(--surface);border-bottom:1px solid var(--line);positio
 .reg-field.grow input{width:100%}
 .reg-summary{display:flex;gap:18px;align-items:center;margin:4px 2px 14px;font-size:13px;color:var(--ink-soft)}
 .reg-summary b{font-family:'Lora',serif;font-size:18px;color:var(--ink);font-weight:600}
+.btn-danger{background:#c0492f;color:#fff}.btn-danger:hover{filter:brightness(1.06)}.btn-danger:disabled{opacity:.45;cursor:not-allowed;filter:none}
+.reg-actions{display:flex;align-items:center;gap:10px;background:var(--lime-soft);border:1px solid #d3e8b4;border-radius:11px;padding:10px 14px;margin:0 2px 14px}
+.reg-actions .selc{font-weight:700;font-size:13px;color:#3f6a16;flex:1}
+th.chk,td.chk{width:38px;text-align:center;padding-left:6px;padding-right:6px}
+td.chk input,th.chk input{width:16px;height:16px;cursor:pointer;accent-color:var(--lime-d)}
 .schip{display:inline-flex;align-items:center;gap:7px;font-size:11.5px;font-weight:700;padding:6px 12px;border-radius:30px;border:1px solid var(--line);background:var(--surface-2);color:var(--ink-faint)}
 .schip .d{width:7px;height:7px;border-radius:50%;background:#c8c2b4}
 .schip.on{background:var(--lime-soft);color:#3f6a16;border-color:#d3e8b4}
@@ -337,11 +343,17 @@ input[type=range]{accent-color:var(--lime-d)}
   </div>
 
   <div class="reg-summary" id="regSummary"></div>
+  <div class="reg-actions" id="regActions" style="display:none">
+    <span class="selc" id="regSelCount">Выбрано: 0</span>
+    <button class="btn btn-blue" id="regZip"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="M7 10l5 5 5-5M12 15V3"/></svg>Скачать сканы (ZIP)</button>
+    <button class="btn btn-danger" id="regDel"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 6h18M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2m2 0v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6"/></svg>Удалить выбранные</button>
+  </div>
 
   <div class="card">
     <div class="tbl-wrap">
       <table>
         <thead><tr>
+          <th class="chk"><input type="checkbox" id="regAll" title="Выбрать все"></th>
           <th>№ СФ</th><th>Дата</th><th>Контрагент</th><th>ИНН</th><th>Точка</th>
           <th class="r">Сумма</th><th>Исправл.</th><th>Сверка CRM</th><th>Статус</th>
         </tr></thead>
@@ -888,7 +900,7 @@ let toastT; function showToast(msg,err){ const t=$('#toast'); t.textContent=msg;
 document.addEventListener('keydown',e=>{ if(e.key==='Escape'){ closeDetail(); setOverlay.classList.remove('show'); $('#regOverlay').classList.remove('show'); } });
 
 /* ===== Реестр (поиск по базе) ===== */
-let regRows=[]; let regLoaded=false;
+let regRows=[]; let regLoaded=false; let regSel=new Set();
 function switchView(v){
   document.querySelectorAll('.navtab').forEach(t=>t.classList.toggle('active',t.dataset.view===v));
   $('#viewUpload').style.display = v==='upload'?'':'none';
@@ -916,6 +928,7 @@ async function regFind(){
 }
 function renderRegRows(){
   const tb=$('#regBody'), empty=$('#regEmpty');
+  regSel.clear(); if($('#regAll')) $('#regAll').checked=false; updateRegActions();
   if(!regRows.length){ tb.innerHTML=''; empty.style.display='block'; empty.querySelector('.t').textContent='Ничего не найдено по этому запросу.'; $('#regSummary').innerHTML=''; return; }
   empty.style.display='none';
   const sum=regRows.reduce((a,x)=>a+(Number(x.total_amount)||0),0);
@@ -929,6 +942,7 @@ function renderRegRows(){
     else if(x.crm_found===false) crm=`<span class="badge b-warn"><span class="bd"></span>Не найден</span>`;
     const stt = x.recognition_status==='OK'?`<span class="badge b-ok"><span class="bd"></span>OK</span>`:(x.recognition_status==='Ошибка'?`<span class="badge b-err"><span class="bd"></span>Ошибка</span>`:`<span class="badge b-warn"><span class="bd"></span>Проверить</span>`);
     return `<tr data-id="${x.id}">
+      <td class="chk"><input type="checkbox" class="reg-chk" data-id="${x.id}" ${regSel.has(String(x.id))?'checked':''}></td>
       <td><span class="num-strong tnum">${esc(x.invoice_number||'—')}</span></td>
       <td class="tnum">${esc(x.invoice_date||'—')}</td>
       <td><div class="cell-cust">${esc(x.customer_name||'—')}</div></td>
@@ -938,7 +952,56 @@ function renderRegRows(){
       <td>${corr}</td><td>${crm}</td><td>${stt}</td>
     </tr>`;
   }).join('');
-  tb.querySelectorAll('tr').forEach(tr=>tr.onclick=()=>openRegItem(tr.dataset.id));
+  tb.querySelectorAll('tr').forEach(tr=>{
+    tr.onclick=(e)=>{ if(e.target.closest('.chk')) return; openRegItem(tr.dataset.id); };
+  });
+  tb.querySelectorAll('.reg-chk').forEach(cb=>{
+    cb.onclick=e=>e.stopPropagation();
+    cb.onchange=()=>{ const id=cb.dataset.id; if(cb.checked) regSel.add(id); else regSel.delete(id); syncRegAll(); updateRegActions(); };
+  });
+}
+function syncRegAll(){ const all=$('#regAll'); if(!all) return; const boxes=$('#regBody').querySelectorAll('.reg-chk'); all.checked = boxes.length>0 && regSel.size===boxes.length; }
+function updateRegActions(){
+  const bar=$('#regActions'); if(!bar) return;
+  bar.style.display = regSel.size>0 ? 'flex' : 'none';
+  const c=$('#regSelCount'); if(c) c.textContent='Выбрано: '+regSel.size;
+}
+async function regDownloadZip(){
+  const ids=[...regSel]; if(!ids.length) return;
+  if(typeof JSZip==='undefined'){ showToast('Библиотека ZIP не загрузилась, обновите страницу',true); return; }
+  const btn=$('#regZip'); btn.disabled=true; const orig=btn.innerHTML; btn.textContent='Готовлю ZIP…';
+  try{
+    const zip=new JSZip(); let added=0;
+    const safe=s=>(s||'').toString().replace(/[^a-zA-Zа-яА-Я0-9_\-]+/g,'_').slice(0,40);
+    for(const id of ids){
+      const x=regRows.find(r=>String(r.id)===String(id));
+      const r=await fetch('/api/invoices/'+id+'/image'); if(!r.ok) continue;
+      const j=await r.json(); if(!j.dataUrl) continue;
+      const m=j.dataUrl.match(/^data:(.*?);base64,(.*)$/); if(!m) continue;
+      const ext=m[1].includes('png')?'png':'jpg';
+      zip.file(`СФ_${safe(x&&x.invoice_number)}_${safe(x&&x.delivery_point)}.${ext}`, m[2], {base64:true});
+      added++;
+    }
+    if(!added){ showToast('Сканы не найдены',true); }
+    else{
+      const blob=await zip.generateAsync({type:'blob'});
+      const url=URL.createObjectURL(blob); const a=document.createElement('a'); a.href=url; a.download='Novagreen_сканы.zip'; a.click(); URL.revokeObjectURL(url);
+      showToast('ZIP готов · файлов: '+added);
+    }
+  }catch(e){ showToast('Ошибка ZIP: '+e.message,true); }
+  btn.disabled=false; btn.innerHTML=orig;
+}
+async function regDeleteSelected(){
+  const ids=[...regSel]; if(!ids.length) return;
+  if(!confirm('Удалить из базы выбранные накладные ('+ids.length+' шт.)?\nДействие необратимо — сканы и данные будут стёрты.')) return;
+  const btn=$('#regDel'); btn.disabled=true;
+  try{
+    const r=await fetch('/api/invoices/delete',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({ids:ids.map(Number)})});
+    const j=await r.json(); if(!r.ok) throw new Error(j.error||'ошибка');
+    showToast('Удалено: '+(j.deleted!=null?j.deleted:ids.length));
+    regSel.clear(); regFind();
+  }catch(e){ showToast('Ошибка удаления: '+e.message,true); }
+  btn.disabled=false;
 }
 async function openRegItem(id){
   const x=regRows.find(r=>String(r.id)===String(id)); if(!x) return;
@@ -991,6 +1054,9 @@ function regExportExcel(){
   showToast('Реестр выгружен · строк: '+rows.length);
 }
 $('#regFind').onclick=regFind;
+$('#regAll').onchange=()=>{ const on=$('#regAll').checked; $('#regBody').querySelectorAll('.reg-chk').forEach(cb=>{ cb.checked=on; if(on) regSel.add(cb.dataset.id); else regSel.delete(cb.dataset.id); }); updateRegActions(); };
+$('#regZip').onclick=regDownloadZip;
+$('#regDel').onclick=regDeleteSelected;
 $('#regReset').onclick=()=>{ $('#regQ').value=''; $('#regInn').value=''; $('#regFrom').value=''; $('#regTo').value=''; $('#regStatus').value=''; regFind(); };
 $('#regExport').onclick=regExportExcel;
 $('#regQ').addEventListener('keydown',e=>{ if(e.key==='Enter') regFind(); });
