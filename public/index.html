@@ -79,6 +79,8 @@ td.chk input,th.chk input{width:16px;height:16px;cursor:pointer;accent-color:var
 .login-err{color:#c0492f;font-size:12.5px;min-height:17px;font-weight:600;margin-top:2px}
 .userbox{display:flex;align-items:center;gap:9px;margin-right:2px}
 .userbox .uname{font-size:12.5px;font-weight:700;color:var(--ink-soft)}
+.btn-sm{padding:5px 10px;font-size:12px;border-radius:8px}
+.u-actions{display:flex;gap:6px;flex-wrap:wrap}
 .schip{display:inline-flex;align-items:center;gap:7px;font-size:11.5px;font-weight:700;padding:6px 12px;border-radius:30px;border:1px solid var(--line);background:var(--surface-2);color:var(--ink-faint)}
 .schip .d{width:7px;height:7px;border-radius:50%;background:#c8c2b4}
 .schip.on{background:var(--lime-soft);color:#3f6a16;border-color:#d3e8b4}
@@ -271,6 +273,9 @@ input[type=range]{accent-color:var(--lime-d)}
     <div class="schip" id="chipTg"><span class="d"></span>Telegram</div>
     <div class="userbox" id="userBox" style="display:none">
       <span class="uname" id="userName"></span>
+      <button class="icon-btn" id="btnUsers" title="Пользователи" style="display:none">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87M16 3.13a4 4 0 0 1 0 7.75"/></svg>
+      </button>
       <button class="icon-btn" id="btnLogout" title="Выйти из системы">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><path d="M16 17l5-5-5-5M21 12H9"/></svg>
       </button>
@@ -441,6 +446,31 @@ input[type=range]{accent-color:var(--lime-d)}
 
 <div class="toast" id="toast"></div>
 
+<div class="overlay" id="usersOverlay">
+  <div class="modal" style="max-width:760px">
+    <div class="modal-hd">
+      <div style="flex:1"><div class="mt">Пользователи</div><div class="ms">Сотрудники с доступом к программе</div></div>
+      <button class="icon-btn" id="usersClose"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 6L6 18M6 6l12 12"/></svg></button>
+    </div>
+    <div class="modal-body" style="display:block;padding:20px 22px;overflow:auto">
+      <div class="ed-section">Добавить пользователя</div>
+      <div class="reg-row" style="margin-bottom:6px">
+        <div class="reg-field"><label>Логин</label><input id="nuLogin" placeholder="login"></div>
+        <div class="reg-field grow"><label>ФИО</label><input id="nuName" placeholder="Фамилия Имя"></div>
+        <div class="reg-field"><label>Пароль</label><input id="nuPass" placeholder="пароль"></div>
+        <div class="reg-field"><label>Роль</label><select id="nuRole"><option value="accountant">Бухгалтер</option><option value="admin">Администратор</option></select></div>
+        <button class="btn btn-dark" id="nuAdd">Добавить</button>
+      </div>
+      <div class="ed-section" style="margin-top:18px">Список</div>
+      <div class="tbl-wrap"><table>
+        <thead><tr><th>Логин</th><th>ФИО</th><th>Роль</th><th>Статус</th><th>Действия</th></tr></thead>
+        <tbody id="usersBody"></tbody>
+      </table></div>
+    </div>
+    <div class="modal-ft"><div class="grow"></div><button class="btn btn-ghost" id="usersCloseBtn">Закрыть</button></div>
+  </div>
+</div>
+
 <div class="overlay login" id="loginOverlay">
   <div class="login-card">
     <div class="login-title">Вход в систему</div>
@@ -484,7 +514,7 @@ window.fetch = (url, opts={}) => {
   }catch(e){}
   return _fetch(url,opts).then(r=>{ if(r.status===401 && window.__AUTHON){ doLogout(); } return r; });
 };
-function setUser(u){ try{localStorage.setItem('ng_user',JSON.stringify(u||{}));}catch(e){} const el=$('#userBox'); if(el && u){ el.style.display='flex'; $('#userName').textContent=u.name||u.username||''; } }
+function setUser(u){ try{localStorage.setItem('ng_user',JSON.stringify(u||{}));}catch(e){} const el=$('#userBox'); if(el && u){ el.style.display='flex'; $('#userName').textContent=u.name||u.username||''; } const bu=$('#btnUsers'); if(bu) bu.style.display=(u && u.role==='admin')?'':'none'; }
 function doLogout(){ localStorage.removeItem('ng_token'); localStorage.removeItem('ng_user'); location.reload(); }
 function showLogin(){ const o=$('#loginOverlay'); if(o){ o.classList.add('show'); setTimeout(()=>{ const f=$('#loginUser'); if(f) f.focus(); },60); } }
 async function doLogin(){
@@ -503,6 +533,52 @@ $('#loginBtn').onclick=doLogin;
 $('#loginPass').addEventListener('keydown',e=>{ if(e.key==='Enter') doLogin(); });
 $('#loginUser').addEventListener('keydown',e=>{ if(e.key==='Enter') $('#loginPass').focus(); });
 $('#btnLogout').onclick=doLogout;
+
+/* ===== Управление пользователями (админ) ===== */
+async function openUsers(){ $('#usersOverlay').classList.add('show'); await loadUsers(); }
+async function loadUsers(){
+  const tb=$('#usersBody'); tb.innerHTML='<tr><td colspan="5" style="color:#9fb0a4;padding:14px">Загрузка…</td></tr>';
+  try{
+    const r=await fetch('/api/users'); const j=await r.json();
+    if(!r.ok){ tb.innerHTML='<tr><td colspan="5" style="padding:14px">'+esc(j.error||'ошибка')+'</td></tr>'; return; }
+    const rows=j.rows||[];
+    tb.innerHTML = rows.length ? rows.map(u=>`<tr>
+      <td><b>${esc(u.username)}</b></td>
+      <td>${esc(u.full_name||'—')}</td>
+      <td>${u.role==='admin'?'Администратор':'Бухгалтер'}</td>
+      <td>${u.active?'<span class="badge b-ok"><span class="bd"></span>активен</span>':'<span class="badge b-warn"><span class="bd"></span>заблокирован</span>'}</td>
+      <td><div class="u-actions">
+        <button class="btn btn-ghost btn-sm" data-act="pw" data-id="${u.id}">Пароль</button>
+        <button class="btn btn-ghost btn-sm" data-act="toggle" data-id="${u.id}" data-active="${u.active?1:0}">${u.active?'Заблокировать':'Разблокировать'}</button>
+      </div></td></tr>`).join('') : '<tr><td colspan="5" style="color:#9fb0a4;padding:14px">Нет пользователей</td></tr>';
+    tb.querySelectorAll('button[data-act]').forEach(b=>b.onclick=()=>userAction(b.dataset.act,b.dataset.id,b.dataset.active));
+  }catch(e){ tb.innerHTML='<tr><td colspan="5" style="padding:14px">Ошибка: '+esc(e.message)+'</td></tr>'; }
+}
+async function userAction(act,id,active){
+  try{
+    if(act==='pw'){ const np=prompt('Новый пароль для пользователя:'); if(!np) return;
+      const r=await fetch('/api/users/'+id,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({password:np})});
+      if(r.ok) showToast('Пароль изменён'); else showToast('Ошибка смены пароля',true); }
+    if(act==='toggle'){ const newActive = active==='1'?false:true;
+      if(!confirm(newActive?'Разблокировать пользователя?':'Заблокировать пользователя? Он не сможет войти.')) return;
+      const r=await fetch('/api/users/'+id,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({active:newActive})});
+      if(r.ok) loadUsers(); else showToast('Ошибка',true); }
+  }catch(e){ showToast('Ошибка: '+e.message,true); }
+}
+async function addUser(){
+  const username=$('#nuLogin').value.trim(), full_name=$('#nuName').value.trim(), password=$('#nuPass').value, role=$('#nuRole').value;
+  if(!username||!password){ showToast('Нужны логин и пароль',true); return; }
+  try{
+    const r=await fetch('/api/users',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({username,password,full_name,role})});
+    const j=await r.json(); if(!r.ok){ showToast(j.error||'Ошибка',true); return; }
+    $('#nuLogin').value=''; $('#nuName').value=''; $('#nuPass').value=''; showToast('Пользователь добавлен'); loadUsers();
+  }catch(e){ showToast('Ошибка: '+e.message,true); }
+}
+$('#btnUsers').onclick=openUsers;
+$('#nuAdd').onclick=addUser;
+$('#usersClose').onclick=()=>$('#usersOverlay').classList.remove('show');
+$('#usersCloseBtn').onclick=()=>$('#usersOverlay').classList.remove('show');
+$('#nuPass').addEventListener('keydown',e=>{ if(e.key==='Enter') addUser(); });
 
 /* config */
 fetch('/api/config').then(r=>r.json()).then(async c=>{
@@ -971,7 +1047,7 @@ $('#btnNotify').onclick=notifyAll;
 $('#btnExport').onclick=exportExcel;
 $('#btnClear').onclick=()=>{ if(running||verifying)return; pages=[]; fileMeta.length=0; activeFilter='all'; renderFiles(); renderTable(); updateButtons(); clearProgress(); };
 let toastT; function showToast(msg,err){ const t=$('#toast'); t.textContent=msg; t.classList.toggle('err',!!err); t.classList.add('show'); clearTimeout(toastT); toastT=setTimeout(()=>t.classList.remove('show'),2800); }
-document.addEventListener('keydown',e=>{ if(e.key==='Escape'){ closeDetail(); setOverlay.classList.remove('show'); $('#regOverlay').classList.remove('show'); } });
+document.addEventListener('keydown',e=>{ if(e.key==='Escape'){ closeDetail(); setOverlay.classList.remove('show'); $('#regOverlay').classList.remove('show'); $('#usersOverlay').classList.remove('show'); } });
 
 /* ===== Реестр (поиск по базе) ===== */
 let regRows=[]; let regLoaded=false; let regSel=new Set();
