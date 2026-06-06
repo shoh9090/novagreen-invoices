@@ -340,6 +340,16 @@ app.get('/api/invoices/:id/image', async (req, res) => {
 /* небольшой помощник для чисел */
 function num(v) { if (v === '' || v === null || v === undefined) return null; const n = Number(v); return isNaN(n) ? null : n; }
 
+app.post('/api/invoices/delete', async (req, res) => {
+  if (!pool) return res.status(400).json({ error: 'База не подключена.' });
+  const ids = (req.body && req.body.ids) || [];
+  if (!Array.isArray(ids) || !ids.length) return res.status(400).json({ error: 'Не переданы id' });
+  try {
+    const r = await pool.query('DELETE FROM invoices WHERE id = ANY($1::bigint[])', [ids]);
+    res.json({ ok: true, deleted: r.rowCount });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
 /* ============================================================
    5. Статус конфигурации — что включено на сервере
    ============================================================ */
