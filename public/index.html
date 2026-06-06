@@ -68,6 +68,17 @@ header.app{background:var(--surface);border-bottom:1px solid var(--line);positio
 .reg-actions .selc{font-weight:700;font-size:13px;color:#3f6a16;flex:1}
 th.chk,td.chk{width:38px;text-align:center;padding-left:6px;padding-right:6px}
 td.chk input,th.chk input{width:16px;height:16px;cursor:pointer;accent-color:var(--lime-d)}
+.overlay.login{z-index:200;background:rgba(22,58,40,.55)}
+.login-card{background:var(--surface);border-radius:18px;box-shadow:0 20px 60px rgba(0,0,0,.28);padding:34px 30px;width:350px;max-width:90vw;display:flex;flex-direction:column;gap:7px}
+.login-title{font-family:'Lora',serif;font-size:23px;color:var(--ink);font-weight:600;margin-top:2px}
+.login-sub{font-size:12.5px;color:var(--ink-soft);margin-bottom:16px}
+.login-card label{font-size:11px;font-weight:700;color:var(--ink-soft);margin-top:7px}
+.login-card input{font-family:inherit;font-size:14px;padding:11px 12px;border:1px solid var(--line);border-radius:10px;background:var(--surface)}
+.login-card input:focus{outline:none;border-color:var(--lime-d);box-shadow:0 0 0 3px rgba(140,198,63,.18)}
+.login-card .btn{margin-top:18px;justify-content:center;padding:12px}
+.login-err{color:#c0492f;font-size:12.5px;min-height:17px;font-weight:600;margin-top:2px}
+.userbox{display:flex;align-items:center;gap:9px;margin-right:2px}
+.userbox .uname{font-size:12.5px;font-weight:700;color:var(--ink-soft)}
 .schip{display:inline-flex;align-items:center;gap:7px;font-size:11.5px;font-weight:700;padding:6px 12px;border-radius:30px;border:1px solid var(--line);background:var(--surface-2);color:var(--ink-faint)}
 .schip .d{width:7px;height:7px;border-radius:50%;background:#c8c2b4}
 .schip.on{background:var(--lime-soft);color:#3f6a16;border-color:#d3e8b4}
@@ -258,6 +269,12 @@ input[type=range]{accent-color:var(--lime-d)}
     <div class="hdr-spacer"></div>
     <div class="schip" id="chipCrm"><span class="d"></span>CRM</div>
     <div class="schip" id="chipTg"><span class="d"></span>Telegram</div>
+    <div class="userbox" id="userBox" style="display:none">
+      <span class="uname" id="userName"></span>
+      <button class="icon-btn" id="btnLogout" title="Выйти из системы">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><path d="M16 17l5-5-5-5M21 12H9"/></svg>
+      </button>
+    </div>
     <button class="icon-btn" id="btnSettings" title="Настройки">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1Z"/></svg>
     </button>
@@ -424,6 +441,19 @@ input[type=range]{accent-color:var(--lime-d)}
 
 <div class="toast" id="toast"></div>
 
+<div class="overlay login" id="loginOverlay">
+  <div class="login-card">
+    <div class="login-title">Вход в систему</div>
+    <div class="login-sub">Novagreen Foods · Распознавание счёт-фактур</div>
+    <label>Логин</label>
+    <input id="loginUser" autocomplete="username" placeholder="Ваш логин">
+    <label>Пароль</label>
+    <input id="loginPass" type="password" autocomplete="current-password" placeholder="Ваш пароль">
+    <div class="login-err" id="loginErr"></div>
+    <button class="btn btn-dark" id="loginBtn">Войти</button>
+  </div>
+</div>
+
 <script>
 pdfjsLib.GlobalWorkerOptions.workerSrc = "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js";
 
@@ -441,9 +471,53 @@ const fmtNum = n => (n===''||n==null||isNaN(n)) ? '—' : Math.round(Number(n)).
 const nowStr = () => new Date().toLocaleString('ru-RU',{day:'2-digit',month:'2-digit',year:'numeric',hour:'2-digit',minute:'2-digit'});
 const esc = s => String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 
+/* ===== Авторизация (вход в систему) ===== */
+window.__AUTHON=false;
+function tok(){ return localStorage.getItem('ng_token')||''; }
+const _fetch = window.fetch.bind(window);
+window.fetch = (url, opts={}) => {
+  try{
+    const u=(typeof url==='string')?url:(url&&url.url)||'';
+    if(u.indexOf('/api/')>=0 && (u.charAt(0)==='/'||u.indexOf(location.origin)===0)){
+      const t=tok(); if(t){ opts={...opts}; opts.headers={...(opts.headers||{}),'Authorization':'Bearer '+t}; }
+    }
+  }catch(e){}
+  return _fetch(url,opts).then(r=>{ if(r.status===401 && window.__AUTHON){ doLogout(); } return r; });
+};
+function setUser(u){ try{localStorage.setItem('ng_user',JSON.stringify(u||{}));}catch(e){} const el=$('#userBox'); if(el && u){ el.style.display='flex'; $('#userName').textContent=u.name||u.username||''; } }
+function doLogout(){ localStorage.removeItem('ng_token'); localStorage.removeItem('ng_user'); location.reload(); }
+function showLogin(){ const o=$('#loginOverlay'); if(o){ o.classList.add('show'); setTimeout(()=>{ const f=$('#loginUser'); if(f) f.focus(); },60); } }
+async function doLogin(){
+  const username=$('#loginUser').value.trim(), password=$('#loginPass').value;
+  if(!username||!password){ $('#loginErr').textContent='Введите логин и пароль'; return; }
+  $('#loginErr').textContent=''; const btn=$('#loginBtn'); btn.disabled=true; btn.textContent='Вход…';
+  try{
+    const r=await _fetch('/api/login',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({username,password})});
+    const j=await r.json();
+    if(!r.ok){ $('#loginErr').textContent=j.error||'Ошибка входа'; btn.disabled=false; btn.textContent='Войти'; return; }
+    localStorage.setItem('ng_token', j.token); setUser(j.user);
+    $('#loginOverlay').classList.remove('show'); initAfterAuth();
+  }catch(e){ $('#loginErr').textContent='Ошибка сети'; btn.disabled=false; btn.textContent='Войти'; }
+}
+$('#loginBtn').onclick=doLogin;
+$('#loginPass').addEventListener('keydown',e=>{ if(e.key==='Enter') doLogin(); });
+$('#loginUser').addEventListener('keydown',e=>{ if(e.key==='Enter') $('#loginPass').focus(); });
+$('#btnLogout').onclick=doLogout;
+
 /* config */
-fetch('/api/config').then(r=>r.json()).then(c=>{ CONFIG=c; settings.autoVerify = c.sd; applyConfigUI(); updateButtons(); })
-  .catch(()=>{ applyConfigUI(); });
+fetch('/api/config').then(r=>r.json()).then(async c=>{
+  CONFIG=c; window.__AUTHON=!!c.auth;
+  if(c.auth){
+    if(tok()){
+      try{
+        const me=await _fetch('/api/me',{headers:{'Authorization':'Bearer '+tok()}});
+        if(me.ok){ const mj=await me.json(); setUser(mj.user); } else { showLogin(); return; }
+      }catch(e){ showLogin(); return; }
+    } else { showLogin(); return; }
+  }
+  initAfterAuth();
+}).catch(()=>{ initAfterAuth(); });
+function initAfterAuth(){ settings.autoVerify = CONFIG.sd; applyConfigUI(); updateButtons(); if(tok()) setUser(JSON.parse(localStorage.getItem('ng_user')||'{}')); }
 function applyConfigUI(){
   $('#chipCrm').classList.toggle('on', CONFIG.sd);
   $('#chipCrm').lastChild.textContent = CONFIG.sd ? 'CRM подключена' : 'CRM выкл.';
