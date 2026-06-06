@@ -685,10 +685,15 @@ fetch('/api/config').then(r=>r.json()).then(async c=>{
 function initAfterAuth(){ settings.autoVerify = CONFIG.sd; applyConfigUI(); updateButtons(); if(tok()) setUser(JSON.parse(localStorage.getItem('ng_user')||'{}')); loadAgentMap(); }
 let agentLoginByKey={};
 function loginFor(key){ if(!key) return ''; return agentLoginByKey[String(key).trim().toLowerCase()]||''; }
+function codeOf(sd){
+  const a=sd&&sd.agent;
+  const direct = a ? (a.code_1C||a.code||'') : '';
+  return direct || loginFor(agentId(sd)) || loginFor(agentName(sd)) || agentName(sd) || '';
+}
 async function loadAgentMap(){
   try{ const r=await fetch('/api/crm-agents'); const j=await r.json();
     if(r.ok){ agentLoginByKey={};
-      (j.rows||[]).forEach(a=>{ const lg=a.login||a.name||a.sd_id; [a.sd_id,a.name,a.login,a.code].forEach(k=>{ if(k) agentLoginByKey[String(k).trim().toLowerCase()]=lg; }); });
+      (j.rows||[]).forEach(a=>{ const code=a.code||a.login||a.name||a.sd_id; [a.sd_id,a.name,a.login,a.code].forEach(k=>{ if(k) agentLoginByKey[String(k).trim().toLowerCase()]=code; }); });
       if(typeof renderTable==='function') renderTable();
       if(typeof regRows!=='undefined' && regRows.length && typeof renderRegRows==='function') renderRegRows();
     }
@@ -980,7 +985,7 @@ function renderTable(){
       <td class="r tnum">${p.status==='done'?fmtNum(f.vat_amount):'—'}</td>
       <td>${corrBadge(p)}</td>
       <td>${crmBadge(p)}</td>
-      <td>${(()=>{ const lg=loginFor(agentId(p.sd))||loginFor(agentName(p.sd)); const v=lg||agentName(p.sd); return v?`<span class="cell-pt">${esc(v)}</span>`:'<span style="color:var(--ink-faint)">—</span>'; })()}</td>
+      <td>${(()=>{ const v=codeOf(p.sd); return v?`<span class="cell-pt">${esc(v)}</span>`:'<span style="color:var(--ink-faint)">—</span>'; })()}</td>
       <td>${statusBadge(p)}</td>
       <td style="text-align:center">${(p.compare && !p.compare.match)?sentIcon(p):''}</td>
     </tr>`;
@@ -1209,7 +1214,7 @@ function renderRegRows(){
       <td><div class="cell-cust">${esc(x.customer_name||'—')}</div></td>
       <td class="tnum">${esc(x.inn||'—')}</td>
       <td class="cell-pt">${esc(x.delivery_point||'—')}</td>
-      <td>${esc(x.agent_login||loginFor(x.crm_agent)||loginFor(x.crm_agent_name)||x.crm_agent_name||x.crm_agent||'—')}</td>
+      <td>${esc(loginFor(x.crm_agent)||loginFor(x.crm_agent_name)||x.agent_login||x.crm_agent_name||x.crm_agent||'—')}</td>
       <td class="r tnum num-strong">${fmtNum(x.total_amount)}</td>
       <td>${corr}</td><td>${crm}</td><td>${stt}</td>
     </tr>`;
