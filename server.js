@@ -746,8 +746,8 @@ app.get('/api/invoices', async (req, res) => {
       agent: "agent_login",
       sum:   "total_amount",
       corr:  "manual_correction",
-      crm:   "crm_match",
-      stt:   "recognition_status"
+      crm:   "CASE WHEN crm_found = false THEN 0 WHEN crm_match = false THEN 1 WHEN crm_match = true THEN 2 ELSE 3 END",
+      stt:   "CASE WHEN recognition_status = 'Ошибка' THEN 0 WHEN recognition_status <> 'OK' THEN 1 WHEN (crm_found = false OR crm_match = false) THEN 2 ELSE 3 END"
     };
     const sortExpr = sortMap[(req.query.sort || '').toString()] || sortMap.num;
     const dir = (((req.query.dir || 'desc').toString().toLowerCase()) === 'asc') ? 'ASC' : 'DESC';
