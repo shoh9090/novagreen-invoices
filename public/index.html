@@ -151,6 +151,10 @@ main{max-width:1360px;margin:0 auto;padding:24px 26px 40px;animation:rise .6s cu
 table{width:100%;border-collapse:collapse;min-width:1000px}
 thead th{font-size:10.5px;letter-spacing:.05em;text-transform:uppercase;color:var(--ink-faint);font-weight:700;text-align:left;padding:13px 14px;background:var(--surface-2);border-bottom:1px solid var(--line);white-space:nowrap;position:sticky;top:0}
 thead th.r{text-align:right}
+thead th.sortable{cursor:pointer;user-select:none;transition:color .12s}
+thead th.sortable:hover{color:var(--ink)}
+thead th.sortable.sorted{color:var(--ink)}
+thead th .sar{font-size:9px;margin-left:3px;opacity:.9}
 tbody td{padding:13px 14px;border-bottom:1px solid var(--line-soft);font-size:13px;vertical-align:middle}
 tbody tr{cursor:pointer;transition:background .12s}
 tbody tr:hover{background:var(--lime-soft)}
@@ -377,10 +381,18 @@ input[type=range]{accent-color:var(--lime-d)}
   <div class="card">
     <div class="tbl-wrap">
       <table>
-        <thead><tr>
+        <thead><tr id="regHead">
           <th class="chk"><input type="checkbox" id="regAll" title="Выбрать все"></th>
-          <th>№ СФ</th><th>Дата</th><th>Контрагент</th><th>ИНН</th><th>Точка</th><th>Агент</th>
-          <th class="r">Сумма</th><th>Исправл.</th><th>Сверка CRM</th><th>Статус</th>
+          <th class="sortable" data-sk="num" title="Сортировать">№ СФ<span class="sar"></span></th>
+          <th class="sortable" data-sk="date" title="Сортировать">Дата<span class="sar"></span></th>
+          <th class="sortable" data-sk="cust" title="Сортировать">Контрагент<span class="sar"></span></th>
+          <th class="sortable" data-sk="inn" title="Сортировать">ИНН<span class="sar"></span></th>
+          <th class="sortable" data-sk="point" title="Сортировать">Точка<span class="sar"></span></th>
+          <th class="sortable" data-sk="agent" title="Сортировать">Агент<span class="sar"></span></th>
+          <th class="sortable r" data-sk="sum" title="Сортировать">Сумма<span class="sar"></span></th>
+          <th class="sortable" data-sk="corr" title="Сортировать">Исправл.<span class="sar"></span></th>
+          <th class="sortable" data-sk="crm" title="Сортировать">Сверка CRM<span class="sar"></span></th>
+          <th class="sortable" data-sk="stt" title="Сортировать">Статус<span class="sar"></span></th>
         </tr></thead>
         <tbody id="regBody"></tbody>
       </table>
@@ -1189,8 +1201,42 @@ async function regFind(){
     const r=await fetch('/api/invoices?'+p.toString());
     const j=await r.json();
     if(!r.ok){ throw new Error(j.error||('HTTP '+r.status)); }
-    regRows=j.rows||[]; renderRegRows();
+    regRows=j.rows||[]; applyRegSort();
   }catch(e){ $('#regSummary').innerHTML=''; $('#regBody').innerHTML=''; const el=$('#regEmpty'); el.style.display='block'; el.querySelector('.t').textContent='Ошибка поиска: '+e.message; }
+}
+let regSort={key:'num',dir:-1};
+function regAgentText(x){ return loginFor(x.crm_agent)||loginFor(x.crm_agent_name)||x.agent_login||x.crm_agent_name||x.crm_agent||''; }
+const REG_SORT={
+  num:  {num:false, get:x=>String(x.invoice_number||'')},
+  date: {num:false, get:x=>x.invoice_date_iso||''},
+  cust: {num:false, get:x=>x.customer_name||''},
+  inn:  {num:false, get:x=>String(x.inn||'')},
+  point:{num:false, get:x=>x.delivery_point||''},
+  agent:{num:false, get:x=>regAgentText(x)},
+  sum:  {num:true,  get:x=>Number(x.total_amount)},
+  corr: {num:true,  get:x=>({'Да':2,'Требуется проверка':1})[x.manual_correction]||0},
+  crm:  {num:true,  get:x=> x.crm_found===true?(x.crm_match===true?3:2):(x.crm_found===false?1:0)},
+  stt:  {num:true,  get:x=> x.recognition_status==='OK'?2:(x.recognition_status==='Ошибка'?0:1)}
+};
+function regCompare(a,b){
+  const d=REG_SORT[regSort.key]; if(!d) return 0;
+  let va=d.get(a), vb=d.get(b), r;
+  if(d.num){ va=isNaN(va)?-Infinity:va; vb=isNaN(vb)?-Infinity:vb; r=va-vb; }
+  else r=String(va).localeCompare(String(vb),'ru',{numeric:true,sensitivity:'base'});
+  return r*regSort.dir;
+}
+function updateSortArrows(){
+  document.querySelectorAll('#regHead th.sortable').forEach(th=>{
+    const sar=th.querySelector('.sar');
+    if(th.dataset.sk===regSort.key){ th.classList.add('sorted'); if(sar) sar.textContent=regSort.dir<0?'▼':'▲'; }
+    else { th.classList.remove('sorted'); if(sar) sar.textContent=''; }
+  });
+}
+function applyRegSort(){ regRows.sort(regCompare); updateSortArrows(); renderRegRows(); }
+function sortReg(key){
+  if(regSort.key===key) regSort.dir*=-1;
+  else { regSort.key=key; regSort.dir=(['date','sum','num','corr','crm','stt'].indexOf(key)>=0)?-1:1; }
+  applyRegSort();
 }
 function renderRegRows(){
   const tb=$('#regBody'), empty=$('#regEmpty');
@@ -1214,7 +1260,7 @@ function renderRegRows(){
       <td><div class="cell-cust">${esc(x.customer_name||'—')}</div></td>
       <td class="tnum">${esc(x.inn||'—')}</td>
       <td class="cell-pt">${esc(x.delivery_point||'—')}</td>
-      <td>${esc(loginFor(x.crm_agent)||loginFor(x.crm_agent_name)||x.agent_login||x.crm_agent_name||x.crm_agent||'—')}</td>
+      <td>${esc(regAgentText(x)||'—')}</td>
       <td class="r tnum num-strong">${fmtNum(x.total_amount)}</td>
       <td>${corr}</td><td>${crm}</td><td>${stt}</td>
     </tr>`;
@@ -1328,6 +1374,7 @@ $('#regReset').onclick=()=>{ $('#regQ').value=''; $('#regInn').value=''; $('#reg
 $('#regExport').onclick=regExportExcel;
 $('#regQ').addEventListener('keydown',e=>{ if(e.key==='Enter') regFind(); });
 $('#regInn').addEventListener('keydown',e=>{ if(e.key==='Enter') regFind(); });
+document.querySelectorAll('#regHead th.sortable').forEach(th=>{ th.onclick=()=>sortReg(th.dataset.sk); });
 $('#regdClose').onclick=()=>$('#regOverlay').classList.remove('show');
 $('#regdCloseBtn').onclick=()=>$('#regOverlay').classList.remove('show');
 $('#regOverlay').addEventListener('click',e=>{ if(e.target===$('#regOverlay')) $('#regOverlay').classList.remove('show'); });
