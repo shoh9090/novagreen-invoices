@@ -258,6 +258,21 @@ input[type=range]{accent-color:var(--lime-d)}
 .toast.show{opacity:1;transform:translateX(-50%) translateY(0)}
 .toast.err{background:var(--red)}
 @media(max-width:880px){.modal-body{grid-template-columns:1fr;overflow:auto}.viewer{max-height:46vh}}
+.zoom-lens{position:absolute;pointer-events:none;border:2px solid #8cc63f;border-radius:10px;box-shadow:0 6px 20px rgba(0,0,0,.4);background-repeat:no-repeat;background-color:#fff;z-index:6}
+.regd-tools{display:flex;flex-wrap:wrap;gap:8px;margin-bottom:4px}
+.regd-tools .btn{padding:8px 13px;font-size:12.5px}
+.ed-form{background:var(--surface);border:1px solid var(--line);border-radius:10px;padding:14px 15px;display:flex;flex-direction:column;gap:11px}
+.ed-form label{display:flex;flex-direction:column;gap:4px;font-size:10.5px;font-weight:700;color:var(--ink-soft);text-transform:uppercase;letter-spacing:.04em}
+.ed-form input{font:inherit;font-size:13px;padding:9px 11px;border:1px solid var(--line);border-radius:8px;background:var(--surface-2);color:var(--ink);font-weight:600}
+.ed-form input:focus{outline:none;border-color:#8cc63f;background:#fff}
+.ed-hint{font-size:10.5px;color:var(--ink-faint);font-weight:600;text-transform:none;letter-spacing:0}
+.reg-pager{display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:12px;padding:12px 4px 2px}
+.reg-pager:empty{display:none}
+.reg-pager .pg-nav{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.reg-pager .pg-info{font-size:12.5px;font-weight:700;color:var(--ink-soft);padding:0 6px}
+.reg-pager .pg-size{font-size:12.5px;font-weight:700;color:var(--ink-soft);display:flex;align-items:center;gap:7px}
+.reg-pager .pg-size select{font:inherit;font-size:12.5px;font-weight:700;padding:6px 9px;border:1px solid var(--line);border-radius:8px;background:var(--surface);color:var(--ink)}
+.reg-pager .pg-nav .btn{padding:7px 12px;font-size:12.5px}
 </style>
 </head>
 <body>
@@ -401,6 +416,7 @@ input[type=range]{accent-color:var(--lime-d)}
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M3 9h18M9 21V9"/></svg>
       <div class="t">Введите запрос и нажмите «Найти».</div>
     </div>
+    <div class="reg-pager" id="regPager"></div>
   </div>
 </main>
 
@@ -1188,23 +1204,31 @@ function switchView(v){
 document.querySelectorAll('.navtab').forEach(t=>t.onclick=()=>switchView(t.dataset.view));
 function regShowNoDb(){ $('#regBody').innerHTML=''; const e=$('#regEmpty'); e.style.display='block'; e.querySelector('.t').textContent='База данных не подключена. Включите PostgreSQL на сервере.'; }
 
-async function regFind(){
-  if(!CONFIG.db){ regShowNoDb(); return; }
+function regParams(){
   const p=new URLSearchParams();
   const q=$('#regQ').value.trim(); if(q)p.set('q',q);
   const inn=$('#regInn').value.trim(); if(inn)p.set('inn',inn);
   const from=$('#regFrom').value; if(from)p.set('from',from);
   const to=$('#regTo').value; if(to)p.set('to',to);
   const st=$('#regStatus').value; if(st)p.set('status',st);
+  return p;
+}
+async function regFind(){
+  if(!CONFIG.db){ regShowNoDb(); return; }
+  const p=regParams();
+  p.set('sort',regSort.key); p.set('dir',regSort.dir<0?'desc':'asc');
+  p.set('limit',regPageSize); p.set('offset',(regPage-1)*regPageSize);
   $('#regSummary').innerHTML='<span>Поиск…</span>';
   try{
     const r=await fetch('/api/invoices?'+p.toString());
     const j=await r.json();
     if(!r.ok){ throw new Error(j.error||('HTTP '+r.status)); }
-    regRows=j.rows||[]; applyRegSort();
-  }catch(e){ $('#regSummary').innerHTML=''; $('#regBody').innerHTML=''; const el=$('#regEmpty'); el.style.display='block'; el.querySelector('.t').textContent='Ошибка поиска: '+e.message; }
+    regRows=j.rows||[]; regTotal=(j.total!=null?j.total:regRows.length); regSum=j.sum||0; regMismatch=j.mismatch||0;
+    updateSortArrows(); renderRegRows(); renderPager();
+  }catch(e){ $('#regSummary').innerHTML=''; $('#regBody').innerHTML=''; $('#regPager').innerHTML=''; const el=$('#regEmpty'); el.style.display='block'; el.querySelector('.t').textContent='Ошибка поиска: '+e.message; }
 }
 let regSort={key:'num',dir:-1};
+let regPage=1, regPageSize=50, regTotal=0, regSum=0, regMismatch=0;
 function regAgentText(x){ return loginFor(x.crm_agent)||loginFor(x.crm_agent_name)||x.agent_login||x.crm_agent_name||x.crm_agent||''; }
 const REG_SORT={
   num:  {num:false, get:x=>String(x.invoice_number||'')},
@@ -1236,16 +1260,38 @@ function applyRegSort(){ regRows.sort(regCompare); updateSortArrows(); renderReg
 function sortReg(key){
   if(regSort.key===key) regSort.dir*=-1;
   else { regSort.key=key; regSort.dir=(['date','sum','num','corr','crm','stt'].indexOf(key)>=0)?-1:1; }
-  applyRegSort();
+  regPage=1; regFind();
+}
+function renderPager(){
+  const el=$('#regPager'); if(!el) return;
+  if(!regTotal){ el.innerHTML=''; return; }
+  const pages=Math.max(1,Math.ceil(regTotal/regPageSize));
+  if(regPage>pages){ regPage=pages; }
+  const sizeOpts=[5,20,50,100,500].map(n=>`<option value="${n}" ${n===regPageSize?'selected':''}>${n}</option>`).join('');
+  const from=(regPage-1)*regPageSize+1, to=Math.min(regTotal,regPage*regPageSize);
+  el.innerHTML=`
+    <div class="pg-size">На странице: <select id="regSize">${sizeOpts}</select></div>
+    <div class="pg-nav">
+      <button class="btn btn-ghost" id="pgFirst" ${regPage<=1?'disabled':''}>«</button>
+      <button class="btn btn-ghost" id="pgPrev" ${regPage<=1?'disabled':''}>‹ Назад</button>
+      <span class="pg-info">${from}–${to} из ${regTotal} · стр. ${regPage}/${pages}</span>
+      <button class="btn btn-ghost" id="pgNext" ${regPage>=pages?'disabled':''}>Вперёд ›</button>
+      <button class="btn btn-ghost" id="pgLast" ${regPage>=pages?'disabled':''}>»</button>
+    </div>`;
+  $('#regSize').onchange=e=>{ regPageSize=Number(e.target.value)||50; regPage=1; regFind(); };
+  const go=n=>{ regPage=n; regFind(); };
+  $('#pgFirst').onclick=()=>go(1);
+  $('#pgPrev').onclick=()=>go(Math.max(1,regPage-1));
+  $('#pgNext').onclick=()=>go(Math.min(pages,regPage+1));
+  $('#pgLast').onclick=()=>go(pages);
 }
 function renderRegRows(){
   const tb=$('#regBody'), empty=$('#regEmpty');
   regSel.clear(); if($('#regAll')) $('#regAll').checked=false; updateRegActions();
   if(!regRows.length){ tb.innerHTML=''; empty.style.display='block'; empty.querySelector('.t').textContent='Ничего не найдено по этому запросу.'; $('#regSummary').innerHTML=''; return; }
   empty.style.display='none';
-  const sum=regRows.reduce((a,x)=>a+(Number(x.total_amount)||0),0);
-  const mism=regRows.filter(x=>x.crm_match===false).length;
-  $('#regSummary').innerHTML=`Найдено: <b class="tnum">${regRows.length}</b> &nbsp;·&nbsp; Сумма: <b class="tnum">${fmtNum(sum)}</b> сум${mism?` &nbsp;·&nbsp; Расхождений с CRM: <b class="tnum">${mism}</b>`:''}`;
+  const sum=regSum; const mism=regMismatch;
+  $('#regSummary').innerHTML=`Найдено: <b class="tnum">${regTotal}</b> &nbsp;·&nbsp; Сумма: <b class="tnum">${fmtNum(sum)}</b> сум${mism?` &nbsp;·&nbsp; Расхождений с CRM: <b class="tnum">${mism}</b>`:''}`;
   tb.innerHTML=regRows.map(x=>{
     const corr = x.manual_correction==='Да'?`<span class="badge b-corr"><span class="bd"></span>Да</span>`:(x.manual_correction==='Требуется проверка'?`<span class="badge b-warn"><span class="bd"></span>Проверка</span>`:`<span class="badge b-no"><span class="bd"></span>Нет</span>`);
     let crm='<span style="color:var(--ink-faint)">—</span>';
@@ -1316,64 +1362,190 @@ async function regDeleteSelected(){
   }catch(e){ showToast('Ошибка удаления: '+e.message,true); }
   btn.disabled=false;
 }
+let regdId=null, regdRow=null, regdEdit=false, regdDataUrl=null;
 async function openRegItem(id){
   const x=regRows.find(r=>String(r.id)===String(id)); if(!x) return;
+  regdId=id; regdRow=x; regdEdit=false; regdDataUrl=null;
+  regdUpdateTitle();
+  renderRegdEditor();
+  $('#regdViewer').innerHTML='<div style="color:#9fb0a4;padding:30px;font-size:13px">Загружаю скан…</div>';
+  $('#regOverlay').classList.add('show');
+  try{
+    const r=await fetch('/api/invoices/'+id+'/image'); const j=await r.json();
+    if(r.ok && j.dataUrl){ regdDataUrl=j.dataUrl; $('#regdViewer').innerHTML=`<img src="${j.dataUrl}" alt="скан">`; setupMagnifier(); }
+    else $('#regdViewer').innerHTML='<div style="color:#d9b3a9;padding:30px;font-size:13px">Скан недоступен</div>';
+  }catch(e){ $('#regdViewer').innerHTML='<div style="color:#d9b3a9;padding:30px;font-size:13px">Ошибка загрузки скана</div>'; }
+}
+function regdUpdateTitle(){
+  const x=regdRow; if(!x) return;
   $('#regdTitle').textContent='Счёт-фактура № '+(x.invoice_number||'—');
   $('#regdSub').textContent=(x.customer_name||'')+' · '+(x.invoice_date||'')+' · '+(x.delivery_point||'');
+}
+function renderRegdEditor(){
+  const x=regdRow; if(!x) return;
   const diff=Number(x.crm_diff)||0;
-  $('#regdEditor').innerHTML=`
-    <div class="ed-section">Данные накладной</div>
-    <div class="crm-card">
-      <div class="crm-row"><span class="k">Номер СФ</span><span class="v tnum">${esc(x.invoice_number||'—')}</span></div>
-      <div class="crm-row"><span class="k">Дата</span><span class="v tnum">${esc(x.invoice_date||'—')}</span></div>
-      <div class="crm-row"><span class="k">Контрагент</span><span class="v">${esc(x.customer_name||'—')}</span></div>
-      <div class="crm-row"><span class="k">ИНН</span><span class="v tnum">${esc(x.inn||'—')}</span></div>
-      <div class="crm-row"><span class="k">Точка</span><span class="v">${esc(x.delivery_point||'—')}</span></div>
-      <div class="crm-row"><span class="k">Номер заказа</span><span class="v tnum">${esc(x.order_number||'—')}</span></div>
-      <div class="crm-row"><span class="k">Сумма с НДС (скан)</span><span class="v tnum">${fmtNum(x.total_amount)} сум</span></div>
-      <div class="crm-row"><span class="k">Ручные исправления</span><span class="v">${esc(x.manual_correction||'—')}</span></div>
-    </div>
-    ${x.crm_found!==null && x.crm_found!==undefined ? `
+  const tools = regdEdit
+    ? `<div class="regd-tools"><button class="btn btn-blue" id="regdSaveBtn">💾 Сохранить</button><button class="btn btn-ghost" id="regdCancelBtn">Отмена</button></div>`
+    : `<div class="regd-tools"><button class="btn btn-ghost" id="regdEditBtn">✏️ Редактировать</button>${CONFIG.sd?`<button class="btn btn-blue" id="regdRecheckBtn">🔄 Сверить с CRM</button>`:''}<button class="btn btn-ghost" id="regdDlBtn">⬇️ Скачать скан</button></div>`;
+  let dataHtml;
+  if(regdEdit){
+    dataHtml=`<div class="ed-section">Редактирование данных</div>
+      <div class="ed-form">
+        <label>Номер СФ<input id="regdNum" type="text"></label>
+        <label>Дата <span class="ed-hint">формат ДД.ММ.ГГГГ</span><input id="regdDate" type="text" placeholder="дд.мм.гггг"></label>
+        <label>Контрагент<input id="regdCust" type="text"></label>
+        <label>ИНН<input id="regdInn" type="text"></label>
+        <label>Точка<input id="regdPoint" type="text"></label>
+        <label>Номер заказа<input id="regdOrder" type="text"></label>
+        <label>Сумма с НДС (скан)<input id="regdSum" type="number" step="0.01"></label>
+      </div>
+      <div class="ed-hint" style="margin-top:8px">После сохранения нажмите «Сверить с CRM», чтобы заново проверить заказ в SalesDoctor.</div>`;
+  } else {
+    dataHtml=`<div class="ed-section">Данные накладной</div>
+      <div class="crm-card">
+        <div class="crm-row"><span class="k">Номер СФ</span><span class="v tnum">${esc(x.invoice_number||'—')}</span></div>
+        <div class="crm-row"><span class="k">Дата</span><span class="v tnum">${esc(x.invoice_date||'—')}</span></div>
+        <div class="crm-row"><span class="k">Контрагент</span><span class="v">${esc(x.customer_name||'—')}</span></div>
+        <div class="crm-row"><span class="k">ИНН</span><span class="v tnum">${esc(x.inn||'—')}</span></div>
+        <div class="crm-row"><span class="k">Точка</span><span class="v">${esc(x.delivery_point||'—')}</span></div>
+        <div class="crm-row"><span class="k">Номер заказа</span><span class="v tnum">${esc(x.order_number||'—')}</span></div>
+        <div class="crm-row"><span class="k">Сумма с НДС (скан)</span><span class="v tnum">${fmtNum(x.total_amount)} сум</span></div>
+        <div class="crm-row"><span class="k">Ручные исправления</span><span class="v">${esc(x.manual_correction||'—')}</span></div>
+      </div>`;
+  }
+  const crmHtml = (!regdEdit && x.crm_found!==null && x.crm_found!==undefined) ? `
     <div class="ed-section">Сверка с SalesDoctor</div>
     ${x.crm_found ? `<div class="cmp">
       <div class="box"><div class="lab">Скан</div><div class="val tnum">${fmtNum(x.total_amount)}</div></div>
       <div class="box"><div class="lab">CRM</div><div class="val tnum">${fmtNum(x.crm_total)}</div></div>
       <div class="box ${x.crm_match?'good':'bad'}"><div class="lab">Разница</div><div class="val tnum">${(diff>0?'+':'')}${fmtNum(diff)}</div></div>
     </div>
-    <div class="verdict ${x.crm_match?'good':'bad'}">${x.crm_match?'Суммы совпадают.':'Расхождение '+(diff>0?'+':'')+fmtNum(diff)+' сум.'}${x.crm_agent?' Агент: '+esc(x.crm_agent):''}</div>`
-    : `<div class="note-warn"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M12 8v4M12 16h.01"/></svg><span>Заказ не найден в SalesDoctor.</span></div>`}` : ''}
-  `;
-  $('#regdViewer').innerHTML='<div style="color:#9fb0a4;padding:30px;font-size:13px">Загружаю скан…</div>';
-  $('#regOverlay').classList.add('show');
+    <div class="verdict ${x.crm_match?'good':'bad'}">${x.crm_match?'Суммы совпадают.':'Расхождение '+(diff>0?'+':'')+fmtNum(diff)+' сум.'}${x.crm_agent?' Агент: '+esc(regAgentText(x)||x.crm_agent):''}</div>`
+    : `<div class="note-warn"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M12 8v4M12 16h.01"/></svg><span>Заказ не найден в SalesDoctor.</span></div>`}` : '';
+  $('#regdEditor').innerHTML = tools + dataHtml + crmHtml;
+  if(regdEdit){
+    $('#regdNum').value=x.invoice_number||''; $('#regdDate').value=x.invoice_date||'';
+    $('#regdCust').value=x.customer_name||''; $('#regdInn').value=x.inn||'';
+    $('#regdPoint').value=x.delivery_point||''; $('#regdOrder').value=x.order_number||'';
+    $('#regdSum').value=(x.total_amount==null?'':x.total_amount);
+    $('#regdSaveBtn').onclick=regdSave;
+    $('#regdCancelBtn').onclick=()=>{ regdEdit=false; renderRegdEditor(); };
+  } else {
+    $('#regdEditBtn').onclick=()=>{ regdEdit=true; renderRegdEditor(); };
+    const rb=$('#regdRecheckBtn'); if(rb) rb.onclick=regdRecheck;
+    $('#regdDlBtn').onclick=regdDownload;
+  }
+}
+function applyRowUpdate(row){
+  if(!row) return;
+  const i=regRows.findIndex(r=>String(r.id)===String(row.id));
+  if(i>=0){ regRows[i]=Object.assign({}, regRows[i], row); regdRow=regRows[i]; }
+  renderRegRows(); regdUpdateTitle();
+}
+async function regdSave(){
+  const btn=$('#regdSaveBtn'); if(btn) btn.disabled=true;
+  const body={
+    invoice_number:$('#regdNum').value.trim(),
+    invoice_date:$('#regdDate').value.trim(),
+    customer_name:$('#regdCust').value.trim(),
+    inn:$('#regdInn').value.trim(),
+    delivery_point:$('#regdPoint').value.trim(),
+    order_number:$('#regdOrder').value.trim(),
+    total_amount:$('#regdSum').value.trim()===''?null:Number($('#regdSum').value)
+  };
   try{
-    const r=await fetch('/api/invoices/'+id+'/image'); const j=await r.json();
-    if(r.ok && j.dataUrl) $('#regdViewer').innerHTML=`<img src="${j.dataUrl}" alt="скан">`;
-    else $('#regdViewer').innerHTML='<div style="color:#d9b3a9;padding:30px;font-size:13px">Скан недоступен</div>';
-  }catch(e){ $('#regdViewer').innerHTML='<div style="color:#d9b3a9;padding:30px;font-size:13px">Ошибка загрузки скана</div>'; }
+    const r=await fetch('/api/invoices/'+regdId+'/update',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
+    const j=await r.json(); if(!r.ok) throw new Error(j.error||('HTTP '+r.status));
+    applyRowUpdate(j.row); regdEdit=false; renderRegdEditor();
+    showToast('Изменения сохранены');
+  }catch(e){ showToast('Ошибка сохранения: '+e.message,true); if(btn) btn.disabled=false; }
 }
-function regExportExcel(){
-  if(!regRows.length){ showToast('Нет данных для экспорта'); return; }
-  const rows=regRows.map(x=>({
-    'Номер СФ':x.invoice_number, 'Дата':x.invoice_date, 'Контрагент':x.customer_name, 'ИНН':x.inn,
-    'Точка':x.delivery_point, 'Номер заказа':x.order_number,
-    'Сумма с НДС':x.total_amount===null?'':Number(x.total_amount), 'НДС':x.vat_amount===null?'':Number(x.vat_amount),
-    'Исправления':x.manual_correction, 'Статус':x.recognition_status,
-    'CRM найдено':x.crm_found===true?'Да':(x.crm_found===false?'Не найден':''),
-    'Сумма CRM':x.crm_total===null?'':Number(x.crm_total), 'Разница':x.crm_diff===null?'':Number(x.crm_diff),
-    'Сверка':x.crm_match===true?'совпадает':(x.crm_match===false?'расхождение':''), 'Агент':x.crm_agent_name||x.crm_agent
-  }));
-  const ws=XLSX.utils.json_to_sheet(rows); const wb=XLSX.utils.book_new(); XLSX.utils.book_append_sheet(wb,ws,'Реестр');
-  const d=new Date(); XLSX.writeFile(wb,`Novagreen_реестр_${String(d.getDate()).padStart(2,'0')}-${String(d.getMonth()+1).padStart(2,'0')}-${d.getFullYear()}.xlsx`);
-  showToast('Реестр выгружен · строк: '+rows.length);
+async function regdRecheck(){
+  if(!CONFIG.sd){ showToast('CRM не подключена',true); return; }
+  const x=regdRow; if(!x) return;
+  if(!x.invoice_number){ showToast('Нет номера СФ для сверки',true); return; }
+  const btn=$('#regdRecheckBtn'); const orig=btn?btn.innerHTML:''; if(btn){ btn.disabled=true; btn.innerHTML='Сверяю…'; }
+  try{
+    const r=await fetch('/api/sd/order',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({invoiceNumber:x.invoice_number,date:x.invoice_date,point:x.delivery_point,customer:x.customer_name})});
+    const j=await r.json(); if(!r.ok) throw new Error(j.error||('HTTP '+r.status));
+    let upd;
+    if(j.found){
+      const sd=j.order; const tmp={ fields:{ total_amount_with_vat:x.total_amount }, sd };
+      computeCompare(tmp); const c=tmp.compare;
+      upd={ crm_found:true, crm_sd_id:(sd.code_1C||sd.SD_id)||null, crm_invoice_number:sd.invoiceNumber||null,
+            crm_total:c.crmTotal, crm_diff:c.diff, crm_match:c.match,
+            crm_agent:agentId(sd)||null, crm_agent_name:agentName(sd)||null };
+    } else {
+      upd={ crm_found:false, crm_sd_id:null, crm_invoice_number:null, crm_total:null, crm_diff:null, crm_match:null, crm_agent:null, crm_agent_name:null };
+    }
+    const r2=await fetch('/api/invoices/'+regdId+'/update',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(upd)});
+    const j2=await r2.json(); if(!r2.ok) throw new Error(j2.error||('HTTP '+r2.status));
+    applyRowUpdate(j2.row); renderRegdEditor();
+    showToast(j.found?(upd.crm_match?'Сверка: суммы совпадают ✓':'Сверка: расхождение Δ '+fmtNum(upd.crm_diff)+' сум'):'Сверка: заказ не найден в CRM');
+  }catch(e){ showToast('Ошибка сверки: '+e.message,true); if(btn){ btn.disabled=false; btn.innerHTML=orig; } }
 }
-$('#regFind').onclick=regFind;
+function regdDownload(){
+  if(!regdDataUrl){ showToast('Скан ещё не загружен',true); return; }
+  const x=regdRow;
+  const ext=(regdDataUrl.indexOf('image/png')>=0)?'png':'jpg';
+  let fname=('СФ_'+(x.invoice_number||'')+'_'+(x.delivery_point||'')).replace(/[^0-9A-Za-zА-Яа-яЁё_\-]+/g,'_').slice(0,60);
+  if(!fname) fname='scan';
+  const a=document.createElement('a'); a.href=regdDataUrl; a.download=fname+'.'+ext;
+  document.body.appendChild(a); a.click(); a.remove();
+}
+function setupMagnifier(){
+  const wrap=$('#regdViewer'); if(!wrap) return;
+  const old=wrap.querySelector('.zoom-lens'); if(old) old.remove();
+  const img=wrap.querySelector('img'); if(!img) return;
+  const lens=document.createElement('div'); lens.className='zoom-lens'; lens.style.display='none'; wrap.appendChild(lens);
+  const ZOOM=2.4, LENS=170;
+  function place(e){
+    const ir=img.getBoundingClientRect();
+    const x=e.clientX-ir.left, y=e.clientY-ir.top;
+    if(x<0||y<0||x>ir.width||y>ir.height){ lens.style.display='none'; return; }
+    lens.style.display='block';
+    lens.style.width=LENS+'px'; lens.style.height=LENS+'px';
+    lens.style.left=(x-LENS/2)+'px'; lens.style.top=(y-LENS/2)+'px';
+    lens.style.backgroundImage='url('+img.src+')';
+    lens.style.backgroundSize=(ir.width*ZOOM)+'px '+(ir.height*ZOOM)+'px';
+    lens.style.backgroundPosition=(-(x*ZOOM-LENS/2))+'px '+(-(y*ZOOM-LENS/2))+'px';
+  }
+  img.style.cursor='zoom-in';
+  img.addEventListener('mousemove',place);
+  img.addEventListener('mouseleave',()=>{ lens.style.display='none'; });
+}
+async function regExportExcel(){
+  if(!CONFIG.db){ showToast('База не подключена',true); return; }
+  const btn=$('#regExport'); const orig=btn?btn.innerHTML:''; if(btn){ btn.disabled=true; btn.innerHTML='Готовлю…'; }
+  try{
+    const p=regParams(); p.set('sort',regSort.key); p.set('dir',regSort.dir<0?'desc':'asc'); p.set('all','1');
+    const r=await fetch('/api/invoices?'+p.toString()); const j=await r.json();
+    if(!r.ok) throw new Error(j.error||('HTTP '+r.status));
+    const data=j.rows||[];
+    if(!data.length){ showToast('Нет данных для экспорта'); if(btn){ btn.disabled=false; btn.innerHTML=orig; } return; }
+    const rows=data.map(x=>({
+      'Номер СФ':x.invoice_number, 'Дата':x.invoice_date, 'Контрагент':x.customer_name, 'ИНН':x.inn,
+      'Точка':x.delivery_point, 'Номер заказа':x.order_number,
+      'Сумма с НДС':x.total_amount===null?'':Number(x.total_amount), 'НДС':x.vat_amount===null?'':Number(x.vat_amount),
+      'Исправления':x.manual_correction, 'Статус':x.recognition_status,
+      'CRM найдено':x.crm_found===true?'Да':(x.crm_found===false?'Не найден':''),
+      'Сумма CRM':x.crm_total===null?'':Number(x.crm_total), 'Разница':x.crm_diff===null?'':Number(x.crm_diff),
+      'Сверка':x.crm_match===true?'совпадает':(x.crm_match===false?'расхождение':''), 'Агент':x.crm_agent_name||x.crm_agent
+    }));
+    const ws=XLSX.utils.json_to_sheet(rows); const wb=XLSX.utils.book_new(); XLSX.utils.book_append_sheet(wb,ws,'Реестр');
+    const d=new Date(); XLSX.writeFile(wb,`Novagreen_реестр_${String(d.getDate()).padStart(2,'0')}-${String(d.getMonth()+1).padStart(2,'0')}-${d.getFullYear()}.xlsx`);
+    showToast('Реестр выгружен · строк: '+rows.length);
+  }catch(e){ showToast('Ошибка экспорта: '+e.message,true); }
+  if(btn){ btn.disabled=false; btn.innerHTML=orig; }
+}
+$('#regFind').onclick=()=>{ regPage=1; regFind(); };
 $('#regAll').onchange=()=>{ const on=$('#regAll').checked; $('#regBody').querySelectorAll('.reg-chk').forEach(cb=>{ cb.checked=on; if(on) regSel.add(cb.dataset.id); else regSel.delete(cb.dataset.id); }); updateRegActions(); };
 $('#regZip').onclick=regDownloadZip;
 $('#regDel').onclick=regDeleteSelected;
-$('#regReset').onclick=()=>{ $('#regQ').value=''; $('#regInn').value=''; $('#regFrom').value=''; $('#regTo').value=''; $('#regStatus').value=''; regFind(); };
+$('#regReset').onclick=()=>{ $('#regQ').value=''; $('#regInn').value=''; $('#regFrom').value=''; $('#regTo').value=''; $('#regStatus').value=''; regPage=1; regFind(); };
 $('#regExport').onclick=regExportExcel;
-$('#regQ').addEventListener('keydown',e=>{ if(e.key==='Enter') regFind(); });
-$('#regInn').addEventListener('keydown',e=>{ if(e.key==='Enter') regFind(); });
+$('#regQ').addEventListener('keydown',e=>{ if(e.key==='Enter'){ regPage=1; regFind(); } });
+$('#regInn').addEventListener('keydown',e=>{ if(e.key==='Enter'){ regPage=1; regFind(); } });
 document.querySelectorAll('#regHead th.sortable').forEach(th=>{ th.onclick=()=>sortReg(th.dataset.sk); });
 $('#regdClose').onclick=()=>$('#regOverlay').classList.remove('show');
 $('#regdCloseBtn').onclick=()=>$('#regOverlay').classList.remove('show');
