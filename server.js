@@ -49,6 +49,26 @@ async function r2Delete(key) {
   try { await r2.send(new DeleteObjectCommand({ Bucket: R2_BUCKET, Key: key })); } catch (e) { /* не критично */ }
 }
 
+// Фоновый перенос старых сканов (base64 в базе) в R2 — один раз после старта
+async function migrateBase64ToR2() {
+  if (!pool || !r2) return;
+  try {
+    let moved = 0;
+    for (let i = 0; i < 100; i++) {
+      const r = await pool.query("SELECT id, doc_key, image_base64, image_media_type FROM invoices WHERE image_base64 IS NOT NULL AND image_key IS NULL LIMIT 50");
+      if (!r.rows.length) break;
+      for (const row of r.rows) {
+        try {
+          const key = await r2Upload(row.doc_key, row.image_base64, row.image_media_type);
+          if (key) { await pool.query('UPDATE invoices SET image_key=$1, image_base64=NULL WHERE id=$2', [key, row.id]); moved++; }
+        } catch (e) { /* при сбое оставляем base64 */ }
+      }
+    }
+    if (moved) console.log('✅ Перенесено старых сканов в R2:', moved);
+  } catch (e) { console.error('Авто-перенос в R2:', e.message); }
+}
+setTimeout(migrateBase64ToR2, 6000);
+
 /* ============================================================
    База данных PostgreSQL (Railway). Если DATABASE_URL не задан —
    программа работает как раньше, просто без сохранения в базу.
