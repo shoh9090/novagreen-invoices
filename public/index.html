@@ -203,7 +203,7 @@ td.r{text-align:right}
 .viewer{background:#26342b;padding:18px;overflow:auto;display:flex;justify-content:center;align-items:flex-start}
 .viewer-inner{position:relative;line-height:0;box-shadow:0 14px 40px rgba(0,0,0,.4);border-radius:6px;overflow:hidden;background:#fff}
 .viewer-inner img{display:block;max-width:100%;height:auto}
-.bbox{position:absolute;border:2.5px solid #ff5a3c;border-radius:4px;box-shadow:0 0 0 9999px rgba(255,90,60,.05);background:rgba(255,90,60,.1)}
+.bbox{position:absolute;pointer-events:none;border:2.5px solid #ff5a3c;border-radius:4px;box-shadow:0 0 0 9999px rgba(255,90,60,.05);background:rgba(255,90,60,.1)}
 .bbox .lbl{position:absolute;top:-22px;left:-2px;background:#ff5a3c;color:#fff;font-size:10px;font-weight:700;padding:2px 7px;border-radius:5px;white-space:nowrap}
 .editor{padding:20px;overflow:auto;background:var(--paper)}
 .ed-section{font-size:10.5px;letter-spacing:.08em;text-transform:uppercase;color:var(--ink-faint);font-weight:800;margin:18px 0 11px}
@@ -346,10 +346,18 @@ input[type=range]{accent-color:var(--lime-d)}
   <div class="card">
     <div class="tbl-wrap">
       <table>
-        <thead><tr>
-          <th>Стр.</th><th>Заказ / Номер СФ</th><th>Дата</th><th>Заказчик / точка</th>
-          <th class="r">Сумма с НДС</th><th class="r">НДС</th>
-          <th>Исправления</th><th>Сверка CRM</th><th>Агент</th><th>Статус</th><th style="text-align:center" title="Уведомление агенту">✈</th>
+        <thead><tr id="recHead">
+          <th>Стр.</th>
+          <th class="sortable" data-sk="num" title="Сортировать">Заказ / Номер СФ<span class="sar"></span></th>
+          <th class="sortable" data-sk="date" title="Сортировать">Дата<span class="sar"></span></th>
+          <th class="sortable" data-sk="cust" title="Сортировать">Заказчик / точка<span class="sar"></span></th>
+          <th class="sortable r" data-sk="sum" title="Сортировать">Сумма с НДС<span class="sar"></span></th>
+          <th class="sortable r" data-sk="vat" title="Сортировать">НДС<span class="sar"></span></th>
+          <th class="sortable" data-sk="corr" title="Сортировать">Исправления<span class="sar"></span></th>
+          <th class="sortable" data-sk="crm" title="Сортировать">Сверка CRM<span class="sar"></span></th>
+          <th class="sortable" data-sk="agent" title="Сортировать">Агент<span class="sar"></span></th>
+          <th class="sortable" data-sk="stt" title="Сортировать">Статус<span class="sar"></span></th>
+          <th style="text-align:center" title="Уведомление агенту">✈</th>
         </tr></thead>
         <tbody id="tbody"></tbody>
       </table>
@@ -955,9 +963,12 @@ function statusBadge(p){
   if(p.status==='processing') return `<span class="badge b-proc"><span class="bd"></span>Обработка…</span>`;
   if(p.status==='pending') return `<span class="badge b-no"><span class="bd"></span>Ожидает</span>`;
   const s=p.fields.recognition_status;
-  if(s==='OK') return `<span class="badge b-ok"><span class="bd"></span>OK</span>`;
   if(s==='Ошибка') return `<span class="badge b-err"><span class="bd"></span>Ошибка</span>`;
-  return `<span class="badge b-warn"><span class="bd"></span>Проверить</span>`;
+  if(s!=='OK') return `<span class="badge b-warn"><span class="bd"></span>Проверить</span>`;
+  // распознано OK — но если по CRM проблема (не найден / расхождение), это не «ОК», а внимание
+  const crmProblem = p.sdStatus==='notfound' || (p.sdStatus==='found' && p.compare && !p.compare.match);
+  if(crmProblem) return `<span class="badge b-warn" title="Распознано, но требует внимания: не сошлось с CRM"><span class="bd"></span>!</span>`;
+  return `<span class="badge b-ok"><span class="bd"></span>OK</span>`;
 }
 function corrBadge(p){
   if(p.status!=='done'&&p.status!=='error') return '<span style="color:var(--ink-faint)">—</span>';
@@ -993,8 +1004,51 @@ function filterPages(){
     return true;
   });
 }
+let recSort={key:null,dir:1};
+function dmyToSort(d){ const m=String(d||'').match(/(\d{1,2})[.\-/](\d{1,2})[.\-/](\d{4})/); return m?(m[3]+m[2].padStart(2,'0')+m[1].padStart(2,'0')):''; }
+function recVal(p,key){
+  const f=p.fields||{};
+  switch(key){
+    case 'num': return {s:String(f.invoice_number||'')};
+    case 'date': return {s:dmyToSort(f.invoice_date)};
+    case 'cust': return {s:(f.customer_name||'')+' '+(f.delivery_point||'')};
+    case 'sum': return {n:Number(f.total_amount_with_vat)};
+    case 'vat': return {n:Number(f.vat_amount)};
+    case 'corr': return {n:({'Да':2,'Требуется проверка':1})[f.manual_correction]||0};
+    case 'agent': return {s:String(codeOf(p.sd)||'')};
+    case 'crm': return {n: p.sdStatus==='notfound'?0:(p.sdStatus==='found'&&p.compare&&!p.compare.match?1:(p.sdStatus==='found'&&p.compare&&p.compare.match?2:3))};
+    case 'stt': {
+      const s=f.recognition_status;
+      if(s==='Ошибка') return {n:0};
+      if(s!=='OK') return {n:1};
+      const crmProblem = p.sdStatus==='notfound' || (p.sdStatus==='found'&&p.compare&&!p.compare.match);
+      return {n: crmProblem?2:3};
+    }
+    default: return {s:''};
+  }
+}
+function recCompare(a,b){
+  const va=recVal(a,recSort.key), vb=recVal(b,recSort.key); let r;
+  if('n' in va){ const x=isNaN(va.n)?-Infinity:va.n, y=isNaN(vb.n)?-Infinity:vb.n; r=x-y; }
+  else r=String(va.s).localeCompare(String(vb.s),'ru',{numeric:true,sensitivity:'base'});
+  return r*recSort.dir;
+}
+function updateRecArrows(){
+  document.querySelectorAll('#recHead th.sortable').forEach(th=>{
+    const sar=th.querySelector('.sar');
+    if(th.dataset.sk===recSort.key){ th.classList.add('sorted'); if(sar) sar.textContent=recSort.dir<0?'▼':'▲'; }
+    else { th.classList.remove('sorted'); if(sar) sar.textContent=''; }
+  });
+}
+function sortRec(key){
+  if(recSort.key===key) recSort.dir*=-1;
+  else { recSort.key=key; recSort.dir=(['date','sum','num','vat'].indexOf(key)>=0)?-1:1; }
+  renderTable();
+}
 function renderTable(){
   const tbody=$('#tbody'), empty=$('#emptyState'); const list=filterPages();
+  if(recSort.key) list.sort(recCompare);
+  updateRecArrows();
   if(!pages.length){ tbody.innerHTML=''; empty.style.display='block'; empty.querySelector('.t').textContent='Пока нет данных. Загрузите файлы и нажмите «Распознать».'; $('#stats').style.display='none'; return; }
   empty.style.display=list.length?'none':'block';
   if(!list.length) empty.querySelector('.t').textContent='Нет строк по выбранному фильтру.';
@@ -1061,6 +1115,7 @@ function openDetail(id){
   $('#dmSub').textContent=p.file_name+' · стр. '+p.page_number+' · '+p.uploaded_at;
   const v=$('#dmViewer');
   v.innerHTML=`<img src="${p.dataUrl}" alt="скан">`+p.fields.correction_zones.map(z=>{const[x,y,w,h]=z.bbox.map(Number);return `<div class="bbox" style="left:${x*100}%;top:${y*100}%;width:${w*100}%;height:${h*100}%"><span class="lbl">${esc(z.label||'правка')}</span></div>`;}).join('');
+  setupMagnifier('#dmViewer');
   renderEditor(p); detailOverlay.classList.add('show');
 }
 function renderEditor(p){
@@ -1259,7 +1314,7 @@ function updateSortArrows(){
 function applyRegSort(){ regRows.sort(regCompare); updateSortArrows(); renderRegRows(); }
 function sortReg(key){
   if(regSort.key===key) regSort.dir*=-1;
-  else { regSort.key=key; regSort.dir=(['date','sum','num','corr','crm','stt'].indexOf(key)>=0)?-1:1; }
+  else { regSort.key=key; regSort.dir=(['date','sum','num'].indexOf(key)>=0)?-1:1; }
   regPage=1; regFind();
 }
 function renderPager(){
@@ -1298,7 +1353,14 @@ function renderRegRows(){
     if(x.crm_found===true && x.crm_match===true) crm=`<span class="badge b-ok"><span class="bd"></span>Совпадает</span>`;
     else if(x.crm_found===true && x.crm_match===false) crm=`<span class="badge b-corr"><span class="bd"></span>Δ ${(x.crm_diff>0?'+':'')}${fmtNum(x.crm_diff)}</span>`;
     else if(x.crm_found===false) crm=`<span class="badge b-warn"><span class="bd"></span>Не найден</span>`;
-    const stt = x.recognition_status==='OK'?`<span class="badge b-ok"><span class="bd"></span>OK</span>`:(x.recognition_status==='Ошибка'?`<span class="badge b-err"><span class="bd"></span>Ошибка</span>`:`<span class="badge b-warn"><span class="bd"></span>Проверить</span>`);
+    const sttProblem = x.recognition_status==='OK' && (x.crm_found===false || x.crm_match===false);
+    const stt = x.recognition_status==='Ошибка'
+      ? `<span class="badge b-err"><span class="bd"></span>Ошибка</span>`
+      : (x.recognition_status!=='OK'
+          ? `<span class="badge b-warn"><span class="bd"></span>Проверить</span>`
+          : (sttProblem
+              ? `<span class="badge b-warn" title="Распознано, но требует внимания: не сошлось с CRM"><span class="bd"></span>!</span>`
+              : `<span class="badge b-ok"><span class="bd"></span>OK</span>`));
     return `<tr data-id="${x.id}">
       <td class="chk"><input type="checkbox" class="reg-chk" data-id="${x.id}" ${regSel.has(String(x.id))?'checked':''}></td>
       <td><span class="num-strong tnum">${esc(x.invoice_number||'—')}</span></td>
@@ -1493,8 +1555,8 @@ function regdDownload(){
   const a=document.createElement('a'); a.href=regdDataUrl; a.download=fname+'.'+ext;
   document.body.appendChild(a); a.click(); a.remove();
 }
-function setupMagnifier(){
-  const wrap=$('#regdViewer'); if(!wrap) return;
+function setupMagnifier(sel){
+  const wrap=$(sel||'#regdViewer'); if(!wrap) return;
   const old=wrap.querySelector('.zoom-lens'); if(old) old.remove();
   const img=wrap.querySelector('img'); if(!img) return;
   const lens=document.createElement('div'); lens.className='zoom-lens'; lens.style.display='none'; wrap.appendChild(lens);
@@ -1547,6 +1609,7 @@ $('#regExport').onclick=regExportExcel;
 $('#regQ').addEventListener('keydown',e=>{ if(e.key==='Enter'){ regPage=1; regFind(); } });
 $('#regInn').addEventListener('keydown',e=>{ if(e.key==='Enter'){ regPage=1; regFind(); } });
 document.querySelectorAll('#regHead th.sortable').forEach(th=>{ th.onclick=()=>sortReg(th.dataset.sk); });
+document.querySelectorAll('#recHead th.sortable').forEach(th=>{ th.onclick=()=>sortRec(th.dataset.sk); });
 $('#regdClose').onclick=()=>$('#regOverlay').classList.remove('show');
 $('#regdCloseBtn').onclick=()=>$('#regOverlay').classList.remove('show');
 $('#regOverlay').addEventListener('click',e=>{ if(e.target===$('#regOverlay')) $('#regOverlay').classList.remove('show'); });
