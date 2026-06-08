@@ -736,14 +736,47 @@ app.get('/api/invoices', async (req, res) => {
     if (status === 'corr') where.push(`manual_correction = 'Да'`);
     if (status === 'ok') where.push(`recognition_status = 'OK'`);
     if (status === 'review') where.push(`recognition_status <> 'OK'`);
-    const sql = `SELECT invoices.id, invoice_number, invoice_date, customer_name, inn, delivery_point, order_number,
+    const whereSql = where.length ? 'WHERE ' + where.join(' AND ') : '';
+    const sortMap = {
+      num:   "NULLIF(regexp_replace(coalesce(invoice_number,''),'[^0-9]','','g'),'')::numeric",
+      date:  "invoice_date_iso",
+      cust:  "customer_name",
+      inn:   "inn",
+      point: "delivery_point",
+      agent: "agent_login",
+      sum:   "total_amount",
+      corr:  "manual_correction",
+      crm:   "crm_match",
+      stt:   "recognition_status"
+    };
+    const sortExpr = sortMap[(req.query.sort || '').toString()] || sortMap.num;
+    const dir = (((req.query.dir || 'desc').toString().toLowerCase()) === 'asc') ? 'ASC' : 'DESC';
+
+    // агрегаты по ВСЕЙ выборке (не по текущей странице)
+    const agg = await pool.query(
+      `SELECT COUNT(*)::int AS total, COALESCE(SUM(total_amount),0) AS sum, COUNT(*) FILTER (WHERE crm_match = false)::int AS mismatch
+       FROM invoices ${whereSql}`, p);
+    const total = agg.rows[0].total;
+    const sumAll = Number(agg.rows[0].sum) || 0;
+    const mismatch = agg.rows[0].mismatch;
+
+    const pp = p.slice();
+    let limitSql = '';
+    if ((req.query.all || '') !== '1') {                  // all=1 → выгрузить всё (для Excel)
+      const limit = Math.min(2000, Math.max(1, parseInt(req.query.limit, 10) || 50));
+      const offset = Math.max(0, parseInt(req.query.offset, 10) || 0);
+      pp.push(limit); pp.push(offset);
+      limitSql = `LIMIT $${pp.length - 1} OFFSET $${pp.length}`;
+    }
+    const sql = `SELECT invoices.id, invoice_number, invoice_date, invoice_date_iso, customer_name, inn, delivery_point, order_number,
       total_amount, vat_amount, manual_correction, recognition_status, crm_found, crm_total, crm_diff, crm_match, crm_agent, crm_agent_name,
       ca.login AS agent_login, file_name, page_number, saved_at
       FROM invoices LEFT JOIN crm_agents ca ON ca.sd_id = invoices.crm_agent
-      ${where.length ? 'WHERE ' + where.join(' AND ') : ''}
-      ORDER BY invoice_date_iso DESC NULLS LAST, saved_at DESC LIMIT 500`;
-    const r = await pool.query(sql, p);
-    res.json({ count: r.rows.length, rows: r.rows });
+      ${whereSql}
+      ORDER BY ${sortExpr} ${dir} NULLS LAST, saved_at DESC
+      ${limitSql}`;
+    const r = await pool.query(sql, pp);
+    res.json({ total, sum: sumAll, mismatch, count: r.rows.length, rows: r.rows });
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
@@ -799,6 +832,45 @@ app.get('/api/migrate-to-r2', async (req, res) => {
 /* ============================================================
    5. Статус конфигурации — что включено на сервере
    ============================================================ */
+app.post('/api/invoices/:id/update', async (req, res) => {
+  if (!pool) return res.status(400).json({ error: 'База не подключена.' });
+  try {
+    const id = Number(req.params.id);
+    if (!id) return res.status(400).json({ error: 'Нет id' });
+    const b = req.body || {};
+    const sets = []; const vals = []; let i = 1;
+    const add = (col, val) => { sets.push(`${col}=$${i++}`); vals.push(val); };
+    // редактируемые оператором поля
+    if ('invoice_number' in b) add('invoice_number', b.invoice_number || null);
+    if ('invoice_date' in b) { add('invoice_date', b.invoice_date || null); add('invoice_date_iso', dateToIso(b.invoice_date)); }
+    if ('customer_name' in b) add('customer_name', b.customer_name || null);
+    if ('inn' in b) add('inn', b.inn || null);
+    if ('delivery_point' in b) add('delivery_point', b.delivery_point || null);
+    if ('order_number' in b) add('order_number', b.order_number || null);
+    if ('total_amount' in b) add('total_amount', num(b.total_amount));
+    if ('vat_amount' in b) add('vat_amount', num(b.vat_amount));
+    if ('manual_correction' in b) add('manual_correction', b.manual_correction || null);
+    // поля сверки (приходят при пересверке с CRM)
+    if ('crm_found' in b) add('crm_found', b.crm_found ?? null);
+    if ('crm_sd_id' in b) add('crm_sd_id', b.crm_sd_id || null);
+    if ('crm_invoice_number' in b) add('crm_invoice_number', b.crm_invoice_number || null);
+    if ('crm_total' in b) add('crm_total', num(b.crm_total));
+    if ('crm_diff' in b) add('crm_diff', num(b.crm_diff));
+    if ('crm_match' in b) add('crm_match', b.crm_match ?? null);
+    if ('crm_agent' in b) add('crm_agent', b.crm_agent || null);
+    if ('crm_agent_name' in b) add('crm_agent_name', b.crm_agent_name || null);
+    if (!sets.length) return res.status(400).json({ error: 'Нет полей для обновления' });
+    sets.push('saved_at=NOW()');
+    vals.push(id);
+    await pool.query(`UPDATE invoices SET ${sets.join(', ')} WHERE id=$${i}`, vals);
+    const r = await pool.query(`SELECT invoices.id, invoice_number, invoice_date, invoice_date_iso, customer_name, inn, delivery_point, order_number,
+        total_amount, vat_amount, manual_correction, recognition_status, crm_found, crm_sd_id, crm_invoice_number, crm_total, crm_diff, crm_match, crm_agent, crm_agent_name,
+        ca.login AS agent_login, file_name, page_number, saved_at
+      FROM invoices LEFT JOIN crm_agents ca ON ca.sd_id = invoices.crm_agent WHERE invoices.id=$1`, [id]);
+    res.json({ ok: true, row: r.rows[0] });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
 app.get('/api/config', (req, res) => {
   res.json({
     sd:       !!(process.env.SD_DOMAIN && process.env.SD_LOGIN && process.env.SD_PASSWORD),
