@@ -17,7 +17,9 @@ function typeOr404(req, res) {
 }
 
 function allFields(t) {
-  return [...COMMON_FIELDS, ...t.fields, { key: 'short_name', label: 'Краткое название', type: 'text' }];
+  const list = [...COMMON_FIELDS, ...t.fields, { key: 'short_name', label: 'Краткое название', type: 'text' }];
+  const seen = new Set();
+  return list.filter((f) => (seen.has(f.key) ? false : (seen.add(f.key), true)));
 }
 
 function pickValues(t, body) {

@@ -162,9 +162,18 @@ const COMMON_FIELDS = [
 const sqlType = (f) =>
   f.type === 'number' ? 'NUMERIC' : f.type === 'bool' ? 'BOOLEAN DEFAULT FALSE' : f.type === 'ref' ? 'INTEGER' : 'TEXT DEFAULT \'\'';
 
+const RESERVED_COLS = new Set([
+  'id', 'code', 'code_1c', 'sd_cs_id', 'sd_sd_id', 'name', 'short_name', 'status', 'sort',
+  'comment', 'sync_status', 'last_sync_at', 'created_at', 'created_by', 'updated_at',
+  'updated_by', 'archived_at', 'archived_by',
+]);
+
 function createTableSQL(typeKey) {
   const t = REF_TYPES[typeKey];
-  const custom = t.fields.map((f) => `  ${f.key} ${sqlType(f)}`).join(',\n');
+  const custom = t.fields
+    .filter((f) => !RESERVED_COLS.has(f.key))
+    .map((f) => `  ${f.key} ${sqlType(f)}`)
+    .join(',\n');
   return `
 CREATE TABLE IF NOT EXISTS ${t.table} (
   id SERIAL PRIMARY KEY,
