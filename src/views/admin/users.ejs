@@ -1,0 +1,61 @@
+<%- include('_header') %>
+
+<h2>Пользователи</h2>
+
+<section class="card">
+  <h3>Добавить пользователя</h3>
+  <form method="POST" action="/admin/users" class="form-row">
+    <input name="full_name" placeholder="Имя и фамилия" required>
+    <input name="login" placeholder="Логин" required>
+    <input name="password" type="text" placeholder="Пароль (мин. 6)" minlength="6" required>
+    <fieldset class="checks">
+      <legend>Роли:</legend>
+      <% roles.forEach(function(r) { %>
+        <label class="check"><input type="checkbox" name="role_ids" value="<%= r.id %>"> <%= r.name %></label>
+      <% }) %>
+    </fieldset>
+    <button type="submit" class="btn-primary">Создать</button>
+  </form>
+</section>
+
+<section class="card">
+  <table>
+    <thead>
+      <tr><th>Имя</th><th>Логин</th><th>Роли</th><th>Статус</th><th>Действия</th></tr>
+    </thead>
+    <tbody>
+      <% users.forEach(function(u) { %>
+        <tr class="<%= u.is_active ? '' : 'row-inactive' %>">
+          <td><%= u.full_name %></td>
+          <td><%= u.login %></td>
+          <td>
+            <details>
+              <summary><%= u.role_names %></summary>
+              <form method="POST" action="/admin/users/<%= u.id %>/roles" class="checks">
+                <% roles.forEach(function(r) { %>
+                  <label class="check"><input type="checkbox" name="role_ids" value="<%= r.id %>"> <%= r.name %></label>
+                <% }) %>
+                <button type="submit">Сохранить роли</button>
+              </form>
+            </details>
+          </td>
+          <td><%= u.is_active ? 'Активен' : 'Отключён' %></td>
+          <td class="actions">
+            <form method="POST" action="/admin/users/<%= u.id %>/toggle">
+              <button type="submit"><%= u.is_active ? 'Отключить' : 'Включить' %></button>
+            </form>
+            <details>
+              <summary>Сбросить пароль</summary>
+              <form method="POST" action="/admin/users/<%= u.id %>/password" class="inline-form">
+                <input name="password" type="text" placeholder="Новый пароль" minlength="6" required>
+                <button type="submit">Сохранить</button>
+              </form>
+            </details>
+          </td>
+        </tr>
+      <% }) %>
+    </tbody>
+  </table>
+</section>
+
+<%- include('_footer') %>

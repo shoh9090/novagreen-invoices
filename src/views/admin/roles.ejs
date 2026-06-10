@@ -1,0 +1,35 @@
+<%- include('_header') %>
+
+<h2>Роли</h2>
+<p class="muted">Роль определяет, какие плитки видит сотрудник. Один человек может иметь несколько ролей.</p>
+
+<section class="card">
+  <h3>Создать роль</h3>
+  <form method="POST" action="/admin/roles" class="form-row">
+    <input name="name" placeholder="Например: Бухгалтер, Производственник, Продажник" required>
+    <button type="submit" class="btn-primary">Создать</button>
+  </form>
+</section>
+
+<% roles.forEach(function(r) { %>
+  <section class="card">
+    <h3><%= r.name %> <% if (r.is_admin) { %><span class="badge">админ — видит всё</span><% } %></h3>
+    <% if (!r.is_admin) { %>
+      <form method="POST" action="/admin/roles/<%= r.id %>/tiles" class="checks">
+        <% tiles.forEach(function(t) { %>
+          <% var checked = roleTiles.some(function(x){ return x.role_id === r.id && x.tile_id === t.id; }); %>
+          <label class="check">
+            <input type="checkbox" name="tile_ids" value="<%= t.id %>" <%= checked ? 'checked' : '' %>>
+            <%= t.icon %> <%= t.title %>
+          </label>
+        <% }) %>
+        <button type="submit">Сохранить доступ</button>
+      </form>
+      <form method="POST" action="/admin/roles/<%= r.id %>/delete" onsubmit="return confirm('Удалить роль «<%= r.name %>»?')">
+        <button type="submit" class="btn-danger-link">Удалить роль</button>
+      </form>
+    <% } %>
+  </section>
+<% }) %>
+
+<%- include('_footer') %>
