@@ -116,6 +116,8 @@ async function initDb() {
   `);
   await pool.query(`ALTER TABLE invoices ADD COLUMN IF NOT EXISTS image_key TEXT;`);
   await pool.query(`ALTER TABLE invoices ADD COLUMN IF NOT EXISTS crm_agent_name TEXT;`);
+  await pool.query(`ALTER TABLE invoices ADD COLUMN IF NOT EXISTS corrected_amount NUMERIC;`);
+  await pool.query(`ALTER TABLE invoices ADD COLUMN IF NOT EXISTS correction_expr TEXT;`);
   await pool.query(`CREATE TABLE IF NOT EXISTS crm_agents (
     sd_id TEXT PRIMARY KEY,
     name TEXT,
@@ -754,7 +756,7 @@ app.get('/api/invoices', async (req, res) => {
 
     // агрегаты по ВСЕЙ выборке (не по текущей странице)
     const agg = await pool.query(
-      `SELECT COUNT(*)::int AS total, COALESCE(SUM(total_amount),0) AS sum, COUNT(*) FILTER (WHERE crm_match = false)::int AS mismatch
+      `SELECT COUNT(*)::int AS total, COALESCE(SUM(COALESCE(corrected_amount, total_amount)),0) AS sum, COUNT(*) FILTER (WHERE crm_match = false)::int AS mismatch
        FROM invoices ${whereSql}`, p);
     const total = agg.rows[0].total;
     const sumAll = Number(agg.rows[0].sum) || 0;
@@ -769,7 +771,7 @@ app.get('/api/invoices', async (req, res) => {
       limitSql = `LIMIT $${pp.length - 1} OFFSET $${pp.length}`;
     }
     const sql = `SELECT invoices.id, invoice_number, invoice_date, invoice_date_iso, customer_name, inn, delivery_point, order_number,
-      total_amount, vat_amount, manual_correction, recognition_status, crm_found, crm_total, crm_diff, crm_match, crm_agent, crm_agent_name,
+      total_amount, vat_amount, corrected_amount, correction_expr, manual_correction, recognition_status, crm_found, crm_total, crm_diff, crm_match, crm_agent, crm_agent_name,
       ca.login AS agent_login, file_name, page_number, saved_at
       FROM invoices LEFT JOIN crm_agents ca ON ca.sd_id = invoices.crm_agent
       ${whereSql}
@@ -849,6 +851,8 @@ app.post('/api/invoices/:id/update', async (req, res) => {
     if ('order_number' in b) add('order_number', b.order_number || null);
     if ('total_amount' in b) add('total_amount', num(b.total_amount));
     if ('vat_amount' in b) add('vat_amount', num(b.vat_amount));
+    if ('corrected_amount' in b) add('corrected_amount', num(b.corrected_amount));
+    if ('correction_expr' in b) add('correction_expr', b.correction_expr || null);
     if ('manual_correction' in b) add('manual_correction', b.manual_correction || null);
     // поля сверки (приходят при пересверке с CRM)
     if ('crm_found' in b) add('crm_found', b.crm_found ?? null);
@@ -864,7 +868,7 @@ app.post('/api/invoices/:id/update', async (req, res) => {
     vals.push(id);
     await pool.query(`UPDATE invoices SET ${sets.join(', ')} WHERE id=$${i}`, vals);
     const r = await pool.query(`SELECT invoices.id, invoice_number, invoice_date, invoice_date_iso, customer_name, inn, delivery_point, order_number,
-        total_amount, vat_amount, manual_correction, recognition_status, crm_found, crm_sd_id, crm_invoice_number, crm_total, crm_diff, crm_match, crm_agent, crm_agent_name,
+        total_amount, vat_amount, corrected_amount, correction_expr, manual_correction, recognition_status, crm_found, crm_sd_id, crm_invoice_number, crm_total, crm_diff, crm_match, crm_agent, crm_agent_name,
         ca.login AS agent_login, file_name, page_number, saved_at
       FROM invoices LEFT JOIN crm_agents ca ON ca.sd_id = invoices.crm_agent WHERE invoices.id=$1`, [id]);
     res.json({ ok: true, row: r.rows[0] });
