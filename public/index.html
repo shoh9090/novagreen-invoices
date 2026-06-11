@@ -273,6 +273,7 @@ input[type=range]{accent-color:var(--lime-d)}
 .reg-pager .pg-size{font-size:12.5px;font-weight:700;color:var(--ink-soft);display:flex;align-items:center;gap:7px}
 .reg-pager .pg-size select{font:inherit;font-size:12.5px;font-weight:700;padding:6px 9px;border:1px solid var(--line);border-radius:8px;background:var(--surface);color:var(--ink)}
 .reg-pager .pg-nav .btn{padding:7px 12px;font-size:12.5px}
+.corr-out{font-size:12.5px;font-weight:700;padding:2px 2px 0;min-height:16px}
 </style>
 </head>
 <body>
@@ -1369,7 +1370,7 @@ function renderRegRows(){
       <td class="tnum">${esc(x.inn||'—')}</td>
       <td class="cell-pt">${esc(x.delivery_point||'—')}</td>
       <td>${esc(regAgentText(x)||'—')}</td>
-      <td class="r tnum num-strong">${fmtNum(x.total_amount)}</td>
+      <td class="r tnum num-strong">${fmtNum(effectiveSum(x))}${(x.corrected_amount!=null&&x.corrected_amount!=='')?` <span title="Сумма скорректирована вручную (по скану: ${fmtNum(x.total_amount)})" style="color:#8cc63f;font-weight:700;cursor:default">✎</span>`:''}</td>
       <td>${corr}</td><td>${crm}</td><td>${stt}</td>
     </tr>`;
   }).join('');
@@ -1443,6 +1444,23 @@ function regdUpdateTitle(){
   $('#regdTitle').textContent='Счёт-фактура № '+(x.invoice_number||'—');
   $('#regdSub').textContent=(x.customer_name||'')+' · '+(x.invoice_date||'')+' · '+(x.delivery_point||'');
 }
+function evalSum(expr){
+  if(expr==null) return null;
+  let s=String(expr).trim().replace(/^=/,'').replace(/\s+/g,'').replace(/,/g,'.');
+  if(s==='') return null;
+  if(!/^[0-9+\-*/().]+$/.test(s)) return null;            // только арифметика — безопасно (без eval произвольного кода)
+  try{ const v=Function('"use strict";return ('+s+')')(); return (typeof v==='number'&&isFinite(v))?Math.round(v*100)/100:null; }catch(e){ return null; }
+}
+function effectiveSum(x){ if(!x) return null; return (x.corrected_amount!=null && x.corrected_amount!=='') ? x.corrected_amount : x.total_amount; }
+function regdCorrUpdate(){
+  const out=$('#regdCorrOut'); if(!out) return;
+  const expr=$('#regdCorr')?$('#regdCorr').value:'';
+  const scan=$('#regdSum')?$('#regdSum').value:'';
+  if(!expr || !expr.trim()){ out.innerHTML=`<span style="color:var(--ink-faint)">Без корректировки — итог: <b class="tnum">${scan!==''?fmtNum(Number(scan)):'—'}</b> сум</span>`; return; }
+  const v=evalSum(expr);
+  if(v==null){ out.innerHTML=`<span style="color:#c0584a">⚠ Не удаётся вычислить формулу</span>`; return; }
+  out.innerHTML=`Итог после корректировки: <b class="tnum" style="color:#2f7d32">${fmtNum(v)}</b> сум`;
+}
 function renderRegdEditor(){
   const x=regdRow; if(!x) return;
   const diff=Number(x.crm_diff)||0;
@@ -1459,7 +1477,9 @@ function renderRegdEditor(){
         <label>ИНН<input id="regdInn" type="text"></label>
         <label>Точка<input id="regdPoint" type="text"></label>
         <label>Номер заказа<input id="regdOrder" type="text"></label>
-        <label>Сумма с НДС (скан)<input id="regdSum" type="number" step="0.01"></label>
+        <label>Сумма по скану (распознано)<input id="regdSum" type="number" step="0.01"></label>
+        <label>Корректировка суммы <span class="ed-hint">формула как в Excel, напр. =154400-23200. Пусто = без корректировки.</span><input id="regdCorr" type="text" placeholder="напр. =154400-23200"></label>
+        <div class="corr-out" id="regdCorrOut"></div>
       </div>
       <div class="ed-hint" style="margin-top:8px">После сохранения нажмите «Сверить с CRM», чтобы заново проверить заказ в SalesDoctor.</div>`;
   } else {
@@ -1471,14 +1491,15 @@ function renderRegdEditor(){
         <div class="crm-row"><span class="k">ИНН</span><span class="v tnum">${esc(x.inn||'—')}</span></div>
         <div class="crm-row"><span class="k">Точка</span><span class="v">${esc(x.delivery_point||'—')}</span></div>
         <div class="crm-row"><span class="k">Номер заказа</span><span class="v tnum">${esc(x.order_number||'—')}</span></div>
-        <div class="crm-row"><span class="k">Сумма с НДС (скан)</span><span class="v tnum">${fmtNum(x.total_amount)} сум</span></div>
+        <div class="crm-row"><span class="k">Сумма с НДС</span><span class="v tnum">${fmtNum(effectiveSum(x))} сум</span></div>
+        ${(x.corrected_amount!=null&&x.corrected_amount!=='')?`<div class="crm-row"><span class="k">↳ скорректировано</span><span class="v tnum" style="color:var(--ink-faint)">по скану ${fmtNum(x.total_amount)} · ${esc(x.correction_expr||'')}</span></div>`:''}
         <div class="crm-row"><span class="k">Ручные исправления</span><span class="v">${esc(x.manual_correction||'—')}</span></div>
       </div>`;
   }
   const crmHtml = (!regdEdit && x.crm_found!==null && x.crm_found!==undefined) ? `
     <div class="ed-section">Сверка с SalesDoctor</div>
     ${x.crm_found ? `<div class="cmp">
-      <div class="box"><div class="lab">Скан</div><div class="val tnum">${fmtNum(x.total_amount)}</div></div>
+      <div class="box"><div class="lab">Скан</div><div class="val tnum">${fmtNum(effectiveSum(x))}</div></div>
       <div class="box"><div class="lab">CRM</div><div class="val tnum">${fmtNum(x.crm_total)}</div></div>
       <div class="box ${x.crm_match?'good':'bad'}"><div class="lab">Разница</div><div class="val tnum">${(diff>0?'+':'')}${fmtNum(diff)}</div></div>
     </div>
@@ -1490,6 +1511,10 @@ function renderRegdEditor(){
     $('#regdCust').value=x.customer_name||''; $('#regdInn').value=x.inn||'';
     $('#regdPoint').value=x.delivery_point||''; $('#regdOrder').value=x.order_number||'';
     $('#regdSum').value=(x.total_amount==null?'':x.total_amount);
+    $('#regdCorr').value=x.correction_expr||'';
+    regdCorrUpdate();
+    $('#regdCorr').addEventListener('input', regdCorrUpdate);
+    $('#regdSum').addEventListener('input', regdCorrUpdate);
     $('#regdSaveBtn').onclick=regdSave;
     $('#regdCancelBtn').onclick=()=>{ regdEdit=false; renderRegdEditor(); };
   } else {
@@ -1506,6 +1531,9 @@ function applyRowUpdate(row){
 }
 async function regdSave(){
   const btn=$('#regdSaveBtn'); if(btn) btn.disabled=true;
+  const expr=$('#regdCorr')?$('#regdCorr').value.trim():'';
+  let corrected=null;
+  if(expr){ const v=evalSum(expr); if(v==null){ showToast('Формула корректировки некорректна',true); if(btn) btn.disabled=false; return; } corrected=v; }
   const body={
     invoice_number:$('#regdNum').value.trim(),
     invoice_date:$('#regdDate').value.trim(),
@@ -1513,7 +1541,9 @@ async function regdSave(){
     inn:$('#regdInn').value.trim(),
     delivery_point:$('#regdPoint').value.trim(),
     order_number:$('#regdOrder').value.trim(),
-    total_amount:$('#regdSum').value.trim()===''?null:Number($('#regdSum').value)
+    total_amount:$('#regdSum').value.trim()===''?null:Number($('#regdSum').value),
+    corrected_amount:corrected,
+    correction_expr:expr||null
   };
   try{
     const r=await fetch('/api/invoices/'+regdId+'/update',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
@@ -1532,7 +1562,7 @@ async function regdRecheck(){
     const j=await r.json(); if(!r.ok) throw new Error(j.error||('HTTP '+r.status));
     let upd;
     if(j.found){
-      const sd=j.order; const tmp={ fields:{ total_amount_with_vat:x.total_amount }, sd };
+      const sd=j.order; const tmp={ fields:{ total_amount_with_vat:effectiveSum(x) }, sd };
       computeCompare(tmp); const c=tmp.compare;
       upd={ crm_found:true, crm_sd_id:(sd.code_1C||sd.SD_id)||null, crm_invoice_number:sd.invoiceNumber||null,
             crm_total:c.crmTotal, crm_diff:c.diff, crm_match:c.match,
@@ -1589,6 +1619,7 @@ async function regExportExcel(){
       'Номер СФ':x.invoice_number, 'Дата':x.invoice_date, 'Контрагент':x.customer_name, 'ИНН':x.inn,
       'Точка':x.delivery_point, 'Номер заказа':x.order_number,
       'Сумма с НДС':x.total_amount===null?'':Number(x.total_amount), 'НДС':x.vat_amount===null?'':Number(x.vat_amount),
+      'Корректировка':x.correction_expr||'', 'Сумма итог':effectiveSum(x)===null?'':Number(effectiveSum(x)),
       'Исправления':x.manual_correction, 'Статус':x.recognition_status,
       'CRM найдено':x.crm_found===true?'Да':(x.crm_found===false?'Не найден':''),
       'Сумма CRM':x.crm_total===null?'':Number(x.crm_total), 'Разница':x.crm_diff===null?'':Number(x.crm_diff),
