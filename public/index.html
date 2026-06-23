@@ -966,11 +966,11 @@ function statusBadge(p){
   if(p.status==='pending') return `<span class="badge b-no"><span class="bd"></span>Ожидает</span>`;
   const s=p.fields.recognition_status;
   if(s==='Ошибка') return `<span class="badge b-err"><span class="bd"></span>Ошибка</span>`;
-  if(s!=='OK') return `<span class="badge b-warn"><span class="bd"></span>Проверить</span>`;
   const hasCorr = p.fields.manual_correction==='Да';
   const crmProblem = p.sdStatus==='notfound' || (p.sdStatus==='found' && p.compare && !p.compare.match);
   if(hasCorr) return `<span class="badge b-warn" title="На скане ручные исправления — требует внимания"><span class="bd"></span>!</span>`;
-  if(crmProblem) return `<span class="badge b-warn" title="Распознано, но требует внимания: не сошлось с CRM"><span class="bd"></span>!</span>`;
+  if(s!=='OK') return `<span class="badge b-warn"><span class="bd"></span>Проверить</span>`;
+  if(crmProblem) return `<span class="badge b-warn" title="Не сошлось с CRM"><span class="bd"></span>!</span>`;
   return `<span class="badge b-ok"><span class="bd"></span>OK</span>`;
 }
 function corrBadge(p){
@@ -992,6 +992,7 @@ function crmBadge(p){
   if(p.sdStatus==='error') return `<span class="badge b-err"><span class="bd"></span>Ошибка</span>`;
   if(p.sdStatus==='notfound') return `<span class="badge b-warn"><span class="bd"></span>Не найден</span>`;
   if(p.sdStatus==='found'&&p.compare){
+    if(p.compare.match && p.fields.manual_correction==='Да') return `<span class="badge b-warn"><span class="bd"></span>Совпадает ✏️</span>`;
     if(p.compare.match) return `<span class="badge b-ok"><span class="bd"></span>Совпадает</span>`;
     const d=p.compare.diff; return `<span class="badge b-corr"><span class="bd"></span>Δ ${(d>0?'+':'')}${fmtNum(d)}</span>${p.notified?'<span class="badge b-info" style="margin-left:5px"><span class="bd"></span>TG</span>':''}`;
   }
@@ -1183,7 +1184,13 @@ function renderCrm(p){
       <div class="box ${c.match?'good':'bad'}"><div class="lab">Разница</div><div class="val tnum">${(c.diff>0?'+':'')}${fmtNum(c.diff)}</div></div>
     </div>
     ${c.match
-      ? `<div class="verdict good"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M20 6 9 17l-5-5"/></svg>Суммы совпадают — расхождений нет.</div>`
+      ? (p.fields.manual_correction==='Да'
+          ? `<div class="verdict bad"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><path d="M12 9v4M12 17h.01"/></svg>Суммы совпадают, но на скане есть ручные исправления.</div>
+             <div style="margin-top:10px;display:flex;gap:8px;align-items:center">
+               ${CONFIG.telegram?`<button class="btn btn-primary" id="dmNotifyBtn" style="padding:9px 16px"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="width:16px;height:16px"><path d="M22 2 11 13M22 2l-7 20-4-9-9-4 20-7z"/></svg>${p.notified?'Отправить повторно':'Уведомить менеджера'}</button>`:`<span class="note-info" style="flex:1">Telegram не подключён — уведомление недоступно.</span>`}
+               ${p.notified?'<span class="badge b-info"><span class="bd"></span>Уже отправлено</span>':''}
+             </div>`
+          : `<div class="verdict good"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M20 6 9 17l-5-5"/></svg>Суммы совпадают — расхождений нет.</div>`)
       : `<div class="verdict bad"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><path d="M12 9v4M12 17h.01"/></svg>Расхождение ${(c.diff>0?'+':'')}${fmtNum(c.diff)} сум между сканом и CRM.</div>
          <div style="margin-top:10px;display:flex;gap:8px;align-items:center">
            ${CONFIG.telegram?`<button class="btn btn-primary" id="dmNotifyBtn" style="padding:9px 16px"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="width:16px;height:16px"><path d="M22 2 11 13M22 2l-7 20-4-9-9-4 20-7z"/></svg>${p.notified?'Отправить повторно':'Уведомить менеджера'}</button>`:`<span class="note-info" style="flex:1">Telegram не подключён — уведомление недоступно.</span>`}
@@ -1356,14 +1363,19 @@ function renderRegRows(){
     if(x.crm_found===true && x.crm_match===true) crm=`<span class="badge b-ok"><span class="bd"></span>Совпадает</span>`;
     else if(x.crm_found===true && x.crm_match===false) crm=`<span class="badge b-corr"><span class="bd"></span>Δ ${(x.crm_diff>0?'+':'')}${fmtNum(x.crm_diff)}</span>`;
     else if(x.crm_found===false) crm=`<span class="badge b-warn"><span class="bd"></span>Не найден</span>`;
-    const sttProblem = x.recognition_status==='OK' && (x.crm_found===false || x.crm_match===false || x.manual_correction==='Да');
+    const hasCorr = x.manual_correction==='Да';
+    const sttProblem = hasCorr || (x.recognition_status==='OK' && (x.crm_found===false || x.crm_match===false));
     const stt = x.recognition_status==='Ошибка'
       ? `<span class="badge b-err"><span class="bd"></span>Ошибка</span>`
-      : (x.recognition_status!=='OK'
-          ? `<span class="badge b-warn"><span class="bd"></span>Проверить</span>`
-          : (sttProblem
-              ? `<span class="badge b-warn" title="Распознано, но требует внимания: не сошлось с CRM"><span class="bd"></span>!</span>`
-              : `<span class="badge b-ok"><span class="bd"></span>OK</span>`));
+      : (hasCorr
+          ? `<span class="badge b-warn" title="На скане ручные исправления"><span class="bd"></span>!</span>`
+          : (x.recognition_status!=='OK'
+              ? (sttProblem
+                  ? `<span class="badge b-warn"><span class="bd"></span>!</span>`
+                  : `<span class="badge b-warn"><span class="bd"></span>Проверить</span>`)
+              : (sttProblem
+                  ? `<span class="badge b-warn"><span class="bd"></span>!</span>`
+                  : `<span class="badge b-ok"><span class="bd"></span>OK</span>`)));
     return `<tr data-id="${x.id}">
       <td class="chk"><input type="checkbox" class="reg-chk" data-id="${x.id}" ${regSel.has(String(x.id))?'checked':''}></td>
       <td><span class="num-strong tnum">${esc(x.invoice_number||'—')}</span></td>
