@@ -327,7 +327,7 @@ input[type=range]{accent-color:var(--lime-d)}
   <div class="toolbar">
     <button class="btn btn-dark" id="btnRecognize" disabled><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.35-4.35M11 8v6M8 11h6"/></svg>Распознать</button>
     <button class="btn btn-blue" id="btnVerify" disabled><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 12a9 9 0 1 1-6.2-8.5"/><path d="M22 4 12 14.01l-3-3"/></svg>Сверить с SalesDoctor</button>
-    <button class="btn btn-ghost" id="btnNotify" disabled><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 2 11 13M22 2l-7 20-4-9-9-4 20-7z"/></svg>Уведомить о расхождениях</button>
+    <button class="btn btn-ghost" id="btnNotify" disabled><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 2 11 13M22 2l-7 20-4-9-9-4 20-7z"/></svg>Уведомить агентов</button>
     <button class="btn btn-ghost" id="btnClear" disabled>Очистить</button>
     <div class="grow"></div>
     <div class="filters" id="filters"></div>
@@ -935,6 +935,7 @@ function buildTgText(p){
   if(sd&&sd.agent&&sd.agent.code_1C) L.push('Ответственный (агент): '+esc(sd.agent.code_1C));
   return L.join('\n');
 }
+function needsAttention(p){ return (p.compare && !p.compare.match) || (p.fields && p.fields.manual_correction==='Да'); }
 async function notifyOne(p){
   if(!CONFIG.telegram){ showToast('Telegram не подключён. Настройте на сервере.',true); return false; }
   if(!p.fields.invoice_number || p.fields.invoice_number==='Не распознано'){ showToast('Нет номера СФ для отправки',true); return false; }
@@ -947,8 +948,8 @@ async function notifyOne(p){
   }catch(e){ showToast('Telegram: '+e.message,true); return false; }
 }
 async function notifyAll(){
-  const rows=pages.filter(p=>p.compare && !p.compare.match && !p.notified);
-  if(!rows.length){ showToast('Нет новых расхождений для отправки'); return; }
+  const rows=pages.filter(p=>needsAttention(p) && !p.notified);
+  if(!rows.length){ showToast('Нет новых расхождений/исправлений для отправки'); return; }
   let agent=0,def=0,err=0;
   for(const p of rows){ const res=await notifyOne(p); if(res==='agent') agent++; else if(res) def++; else err++; }
   renderTable(); updateButtons();
@@ -966,8 +967,9 @@ function statusBadge(p){
   const s=p.fields.recognition_status;
   if(s==='Ошибка') return `<span class="badge b-err"><span class="bd"></span>Ошибка</span>`;
   if(s!=='OK') return `<span class="badge b-warn"><span class="bd"></span>Проверить</span>`;
-  // распознано OK — но если по CRM проблема (не найден / расхождение), это не «ОК», а внимание
+  const hasCorr = p.fields.manual_correction==='Да';
   const crmProblem = p.sdStatus==='notfound' || (p.sdStatus==='found' && p.compare && !p.compare.match);
+  if(hasCorr) return `<span class="badge b-warn" title="На скане ручные исправления — требует внимания"><span class="bd"></span>!</span>`;
   if(crmProblem) return `<span class="badge b-warn" title="Распознано, но требует внимания: не сошлось с CRM"><span class="bd"></span>!</span>`;
   return `<span class="badge b-ok"><span class="bd"></span>OK</span>`;
 }
@@ -1070,7 +1072,7 @@ function renderTable(){
       <td>${crmBadge(p)}</td>
       <td>${(()=>{ const v=codeOf(p.sd); return v?`<span class="cell-pt">${esc(v)}</span>`:'<span style="color:var(--ink-faint)">—</span>'; })()}</td>
       <td>${statusBadge(p)}</td>
-      <td style="text-align:center">${(p.compare && !p.compare.match)?sentIcon(p):''}</td>
+      <td style="text-align:center">${needsAttention(p)?sentIcon(p):''}</td>
     </tr>`;
   }).join('');
   tbody.querySelectorAll('tr').forEach(tr=>tr.onclick=()=>openDetail(tr.dataset.id));
@@ -1098,7 +1100,7 @@ function updateButtons(){
   const recognized=pages.filter(p=>p.status==='done');
   $('#btnRecognize').disabled=running||verifying||!hasPending;
   $('#btnVerify').disabled=running||verifying||!CONFIG.sd||!recognized.some(p=>p.fields.invoice_number && p.fields.invoice_number!=='Не распознано');
-  $('#btnNotify').disabled=running||verifying||!CONFIG.telegram||!pages.some(p=>p.compare&&!p.compare.match&&!p.notified);
+  $('#btnNotify').disabled=running||verifying||!CONFIG.telegram||!pages.some(p=>needsAttention(p)&&!p.notified);
   $('#btnClear').disabled=running||verifying||!pages.length;
   $('#btnExport').disabled=!pages.some(p=>p.status==='done'||p.status==='error');
   if(!CONFIG.sd) $('#btnVerify').title='Подключите SalesDoctor на сервере (переменные SD_*)';
@@ -1354,7 +1356,7 @@ function renderRegRows(){
     if(x.crm_found===true && x.crm_match===true) crm=`<span class="badge b-ok"><span class="bd"></span>Совпадает</span>`;
     else if(x.crm_found===true && x.crm_match===false) crm=`<span class="badge b-corr"><span class="bd"></span>Δ ${(x.crm_diff>0?'+':'')}${fmtNum(x.crm_diff)}</span>`;
     else if(x.crm_found===false) crm=`<span class="badge b-warn"><span class="bd"></span>Не найден</span>`;
-    const sttProblem = x.recognition_status==='OK' && (x.crm_found===false || x.crm_match===false);
+    const sttProblem = x.recognition_status==='OK' && (x.crm_found===false || x.crm_match===false || x.manual_correction==='Да');
     const stt = x.recognition_status==='Ошибка'
       ? `<span class="badge b-err"><span class="bd"></span>Ошибка</span>`
       : (x.recognition_status!=='OK'
