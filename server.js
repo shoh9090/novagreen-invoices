@@ -4,6 +4,28 @@ const { Pool } = require('pg');
 
 const app = express();
 app.use(express.json({ limit: '50mb' }));
+
+/* Базовые защитные заголовки */
+app.use((req, res, next) => {
+  res.setHeader('X-Content-Type-Options', 'nosniff');
+  res.setHeader('X-Frame-Options', 'DENY');
+  res.setHeader('Referrer-Policy', 'no-referrer');
+  next();
+});
+
+/* Ограничение попыток входа: 5 неудач → пауза 15 минут (по IP+логину) */
+const loginFails = new Map();
+function loginKey(req, login) { return (req.headers['x-forwarded-for'] || req.ip || '') + '|' + (login || ''); }
+function loginBlocked(key) {
+  const e = loginFails.get(key);
+  return !!(e && e.count >= 5 && Date.now() - e.last < 15 * 60 * 1000);
+}
+function loginFail(key) {
+  const e = loginFails.get(key) || { count: 0, last: 0 };
+  e.count++; e.last = Date.now(); loginFails.set(key, e);
+  if (loginFails.size > 5000) loginFails.clear(); // защита памяти
+}
+function loginOk(key) { loginFails.delete(key); }
 app.use(express.static(path.join(__dirname, 'public')));
 
 /* ============================================================
@@ -218,9 +240,12 @@ app.post('/api/login', async (req, res) => {
   if (!AUTH_ON) return res.json({ ok: true, authDisabled: true });
   const { username, password } = req.body || {};
   if (!username || !password) return res.status(400).json({ error: 'Введите логин и пароль' });
+  const lk = loginKey(req, username);
+  if (loginBlocked(lk)) return res.status(429).json({ error: 'Слишком много попыток входа. Подождите 15 минут.' });
   try {
     const r = await pool.query('SELECT * FROM users WHERE username=$1 AND active=true', [username]);
-    if (!r.rows.length || !verifyPassword(password, r.rows[0].password_hash)) return res.status(401).json({ error: 'Неверный логин или пароль' });
+    if (!r.rows.length || !verifyPassword(password, r.rows[0].password_hash)) { loginFail(lk); return res.status(401).json({ error: 'Неверный логин или пароль' }); }
+    loginOk(lk);
     const u = r.rows[0];
     const token = signToken({ uid: u.id, username: u.username, role: u.role, name: u.full_name, exp: Date.now() + 7 * 24 * 3600 * 1000 });
     res.json({ token, user: { username: u.username, name: u.full_name, role: u.role } });
@@ -475,6 +500,9 @@ app.post('/api/telegram/send', async (req, res) => {
    3b. Двусторонний Telegram-бот: регистрация агентов + выдача сканов
    ============================================================ */
 const TG_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
+const TG_WEBHOOK_SECRET = process.env.AUTH_SECRET
+  ? crypto.createHmac('sha256', process.env.AUTH_SECRET).update('tg-webhook').digest('hex').slice(0, 48)
+  : '';
 function normPhone(p) { return (p == null ? '' : String(p)).replace(/\D/g, '').replace(/^0+/, ''); }
 async function sdFetchAgents() {
   const domain = process.env.SD_DOMAIN;
@@ -518,8 +546,10 @@ async function setupWebhook() {
   const domain = process.env.APP_URL || (process.env.RAILWAY_PUBLIC_DOMAIN ? 'https://' + process.env.RAILWAY_PUBLIC_DOMAIN : '');
   if (!domain) { console.log('ℹ️ APP_URL не задан — webhook бота не установлен'); return; }
   const url = domain.replace(/\/+$/, '') + '/telegram/webhook';
-  const j = await tgApi('setWebhook', { url, allowed_updates: ['message'] });
-  console.log('Telegram webhook:', j.ok ? ('OK → ' + url) : j.description);
+  const params = { url, allowed_updates: ['message'] };
+  if (TG_WEBHOOK_SECRET) params.secret_token = TG_WEBHOOK_SECRET;
+  const j = await tgApi('setWebhook', params);
+  console.log('Telegram webhook:', j.ok ? ('OK → ' + url + (TG_WEBHOOK_SECRET ? ' (с секретом)' : '')) : j.description);
 }
 setTimeout(setupWebhook, 3500);
 
@@ -536,6 +566,9 @@ async function invoiceImageBuffer(row) {
 }
 
 app.post('/telegram/webhook', async (req, res) => {
+  if (TG_WEBHOOK_SECRET && req.headers['x-telegram-bot-api-secret-token'] !== TG_WEBHOOK_SECRET) {
+    return res.status(403).json({ ok: false }); // запрос не от Telegram — отклоняем
+  }
   res.json({ ok: true }); // отвечаем Telegram сразу
   try {
     const msg = req.body && req.body.message; if (!msg) return;
@@ -645,16 +678,23 @@ app.post('/api/telegram/notify', async (req, res) => {
     if (!r.rows.length) return res.status(404).json({ error: 'Накладная не найдена в базе' });
     const v = r.rows[0];
     const diff = Number(v.crm_diff) || 0;
+    const hasCorr = v.manual_correction === 'Да';
+    const hasDiff = v.crm_match === false;
+    const effSum = (v.corrected_amount != null && v.corrected_amount !== '') ? Number(v.corrected_amount) : (v.total_amount != null ? Number(v.total_amount) : null);
+    const header = (hasDiff && hasCorr) ? '⚠️ <b>Расхождение + ручные исправления</b>'
+                 : hasDiff ? '⚠️ <b>Расхождение по счёт-фактуре</b>'
+                 : hasCorr ? '✏️ <b>Ручные исправления на накладной</b>'
+                 : '📋 <b>Счёт-фактура</b>';
     const lines = [
-      '⚠️ <b>Расхождение по счёт-фактуре</b>',
+      header,
       'СФ № ' + (v.invoice_number || '—'),
       (v.customer_name || '') + (v.delivery_point ? (' · ' + v.delivery_point) : ''),
       'Дата: ' + (v.invoice_date || '—'),
-      'Скан: ' + (v.total_amount != null ? Number(v.total_amount).toLocaleString('ru-RU') : '—') + ' сум',
+      'Скан: ' + (effSum != null ? effSum.toLocaleString('ru-RU') : '—') + ' сум' + (v.corrected_amount != null ? ' (скорр.)' : ''),
       'CRM: ' + (v.crm_total != null ? Number(v.crm_total).toLocaleString('ru-RU') : '—') + ' сум',
       'Разница: ' + (diff > 0 ? '+' : '') + diff.toLocaleString('ru-RU') + ' сум'
     ];
-    if (v.manual_correction === 'Да') lines.push('✏️ На скане есть ручные исправления');
+    if (hasCorr) lines.push('✏️ На скане есть ручные исправления — проверьте состав заказа');
     const text = lines.join('\n');
 
     let chatId = null, sentTo = 'default';
